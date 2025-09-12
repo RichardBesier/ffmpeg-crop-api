@@ -8,6 +8,7 @@ import { spawn } from "child_process";
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
+// Run a shell command and collect stdout/stderr
 function sh(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args);
@@ -20,7 +21,7 @@ function sh(cmd, args) {
   });
 }
 
-// download with browser-like headers; ensure it's actually video
+// Download with browser-like headers and verify it's actually a video
 async function downloadToTemp(url) {
   const dir = await fs.mkdtemp(join(tmpdir(), "cropapi-"));
   const file = join(dir, "in.mp4");
@@ -42,6 +43,7 @@ async function downloadToTemp(url) {
   return { dir, file };
 }
 
+// Pull the last "crop=W:H:X:Y" from ffmpeg stderr
 function parseCrop(stderrTxt) {
   const matches = [...stderrTxt.matchAll(/crop=\d+:\d+:\d+:\d+/g)];
   return matches.length ? matches[matches.length - 1][0] : null;
@@ -49,36 +51,44 @@ function parseCrop(stderrTxt) {
 
 app.post("/crop", async (req, res) => {
   try {
-    const { url, probeSeconds = 6, limit = 30 } = req.body || {};
+    const { url, probeSeconds = 3, limit = 30 } = req.body || {};
     if (!url) return res.status(400).json({ error: "Missing url" });
 
     const { dir, file: inFile } = await downloadToTemp(url);
 
-    // 1) detect crop box
+    // 1) Detect crop box from the first N seconds
     const detect = await sh("ffmpeg", [
-      "-y", "-ss", "0", "-t", String(probeSeconds),
+      "-y",
+      "-ss", "0",
+      "-t", String(probeSeconds),
       "-i", inFile,
       "-vf", `cropdetect=limit=${limit}:round=2:reset=0`,
-      "-f", "null", "-"
+      "-f", "null",
+      "-"
     ]);
     const crop = parseCrop(detect.stderr);
     if (!crop) return res.status(422).json({ error: "Could not detect crop" });
 
-    // 2) apply crop safely: force even dims, normalize fps, QT-friendly
+    // 2) Apply crop safely:
+    //    - force even dimensions to keep encoders happy
+    //    - OPTIONAL downscale to height ~1280 for speed (remove ",scale=-2:1280" to keep full res)
     const outFile = join(dir, "out.mp4");
-    const safeVf = `${crop},scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic`;
+    const safeVf = `${crop},scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic,scale=-2:1280`;
 
     await sh("ffmpeg", [
       "-y",
       "-i", inFile,
       "-vf", safeVf,
-      "-r", "30",
+      "-r", "30",                             // normalize fps / timestamps
       "-c:v", "libx264",
-      "-preset", "superfast",
-      "-crf", "20",
-      "-pix_fmt", "yuv420p",
-      "-movflags", "+faststart",
-      "-an",
+      "-preset", "ultrafast",                 // fastest on shared CPU
+      "-crf", "23",                           // a bit more compression = faster
+      "-pix_fmt", "yuv420p",                  // broad compatibility
+      "-movflags", "+faststart",              // moov atom at start
+      "-x264-params", "bframes=0:ref=1:rc-lookahead=0:keyint=60:min-keyint=60:scenecut=0",
+      "-bf", "0",
+      "-threads", "2",
+      "-an",                                   // drop audio; switch to AAC if you want audio
       "-max_muxing_queue_size", "9999",
       outFile
     ]);
