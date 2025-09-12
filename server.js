@@ -8,7 +8,6 @@ import { spawn } from "child_process";
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// ---- helper to run shell cmds
 function sh(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args);
@@ -21,7 +20,7 @@ function sh(cmd, args) {
   });
 }
 
-// ---- download with browser-like headers & verify it's really video
+// download with browser-like headers; ensure it's actually video
 async function downloadToTemp(url) {
   const dir = await fs.mkdtemp(join(tmpdir(), "cropapi-"));
   const file = join(dir, "in.mp4");
@@ -43,7 +42,6 @@ async function downloadToTemp(url) {
   return { dir, file };
 }
 
-// ---- parse "crop=W:H:X:Y" from ffmpeg stderr (use the last one)
 function parseCrop(stderrTxt) {
   const matches = [...stderrTxt.matchAll(/crop=\d+:\d+:\d+:\d+/g)];
   return matches.length ? matches[matches.length - 1][0] : null;
@@ -56,7 +54,7 @@ app.post("/crop", async (req, res) => {
 
     const { dir, file: inFile } = await downloadToTemp(url);
 
-    // 1) detect crop box from first N seconds
+    // 1) detect crop box
     const detect = await sh("ffmpeg", [
       "-y", "-ss", "0", "-t", String(probeSeconds),
       "-i", inFile,
@@ -66,7 +64,7 @@ app.post("/crop", async (req, res) => {
     const crop = parseCrop(detect.stderr);
     if (!crop) return res.status(422).json({ error: "Could not detect crop" });
 
-    // 2) apply crop safely: force even dimensions, normalize FPS, QuickTime-friendly
+    // 2) apply crop safely: force even dims, normalize fps, QT-friendly
     const outFile = join(dir, "out.mp4");
     const safeVf = `${crop},scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic`;
 
@@ -74,13 +72,13 @@ app.post("/crop", async (req, res) => {
       "-y",
       "-i", inFile,
       "-vf", safeVf,
-      "-r", "30",                    // stabilize timestamps
+      "-r", "30",
       "-c:v", "libx264",
-      "-preset", "superfast",        // fast on shared CPU
+      "-preset", "superfast",
       "-crf", "20",
-      "-pix_fmt", "yuv420p",         // QuickTime/IG friendly
-      "-movflags", "+faststart",     // moov at start
-      "-an",                         // no audio; swap for AAC if you want audio
+      "-pix_fmt", "yuv420p",
+      "-movflags", "+faststart",
+      "-an",
       "-max_muxing_queue_size", "9999",
       outFile
     ]);
