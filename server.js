@@ -124,5 +124,34 @@ app.post("/crop-upload-white", rawUpload, async (req, res) => {
   }
 });
 
+// Crops a strip from the top (percentage)
+app.post("/crop-strip-top", rawUpload, async (req, res) => {
+  try {
+    if (!req.body || !req.body.length) return res.status(400).json({ error: "No file" });
+
+    const percent = Number(req.query.percent || 5); // default 5%
+    const { dir, file } = await bufferToTemp(req.body);
+    const outFile = join(tmpdir(), `cropapi-${Date.now()}-strip.mp4`);
+
+    // Full width; reduce height by %, offset down by the same %
+    const vf = `crop=in_w:in_h*${(100 - percent) / 100}:0:in_h*${percent / 100}`;
+
+    await sh("ffmpeg", [
+      "-y", "-i", file,
+      "-vf", vf,
+      "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      "-an", outFile
+    ]);
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", 'attachment; filename="cropped.mp4"');
+    res.sendFile(outFile, async () => { await fs.rm(dir, { recursive: true, force: true }); });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
