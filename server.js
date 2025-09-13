@@ -141,20 +141,40 @@ async function detectMotionCrop(file, seconds = 12) {
     "tblend=all_mode=difference," +
     "format=gray," +
     "boxblur=20:1:cr=0:ar=0," +
-    "lut=y='val>20?255:0'," +   // more sensitive
+    "lut=y='val>20?255:0'," +     // lower threshold for sensitivity
     "bbox=detect=0," +
     "metadata=mode=print:key=lavfi.bbox.;file=-";
+
   try {
     const { stderr } = await sh("ffmpeg", [
-      "-y","-ss","0","-t",String(seconds),
-      "-i",file, "-an",
-      "-vf", vf, "-f","null","-"
+      "-y", "-ss", "0", "-t", String(seconds),
+      "-i", file,
+      "-an",
+      "-vf", vf,
+      "-f", "null", "-"
     ]);
-    return parseBboxMeta(stderr);
+
+    // Collect all bboxes, not just the last
+    const xs = [...stderr.matchAll(/lavfi\.bbox\.x=(\d+)/g)].map(m => +m[1]);
+    const ys = [...stderr.matchAll(/lavfi\.bbox\.y=(\d+)/g)].map(m => +m[1]);
+    const ws = [...stderr.matchAll(/lavfi\.bbox\.w=(\d+)/g)].map(m => +m[1]);
+    const hs = [...stderr.matchAll(/lavfi\.bbox\.h=(\d+)/g)].map(m => +m[1]);
+
+    if (!xs.length) return null;
+
+    const x1 = Math.min(...xs);
+    const y1 = Math.min(...ys);
+    const x2 = Math.max(...xs.map((x,i)=>x+ws[i]));
+    const y2 = Math.max(...ys.map((y,i)=>y+hs[i]));
+    const w  = x2 - x1;
+    const h  = y2 - y1;
+
+    return (w>0 && h>0) ? { x:x1, y:y1, w, h, text:`crop=${w}:${h}:${x1}:${y1}` } : null;
   } catch {
     return null;
   }
 }
+
 
 
 // ------------------------------
