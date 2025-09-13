@@ -201,5 +201,43 @@ app.post("/crop-upload", rawUpload, async (req, res) => {
   }
 });
 
+// Binary upload mode (white background only)
+app.post("/crop-upload-white", rawUpload, async (req, res) => {
+  try {
+    if (!req.body || !req.body.length) return res.status(400).json({ error: "No file in body" });
+
+    const { dir, file } = await bufferToTemp(req.body);
+
+    // Run only the white-background detection
+    const crop = await detectOnce(file, 4,
+      "format=gray,negate,boxblur=24:1:cr=0:ar=0,cropdetect=limit=45:round=2:reset=0"
+    );
+    if (!crop) throw new Error("Could not detect crop");
+
+    // Use the same encoder, just with this crop
+    const outFile = join(tmpdir(), `cropapi-${Date.now()}-out.mp4`);
+    const vf = [
+      crop.text,
+      "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic"
+    ].join(",");
+
+    await sh("ffmpeg", [
+      "-y","-i",file,
+      "-vf",vf,
+      "-c:v","libx264","-crf","23","-preset","ultrafast",
+      "-pix_fmt","yuv420p","-movflags","+faststart",
+      "-an", outFile
+    ]);
+
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
+    res.sendFile(outFile, async ()=>{ await fs.rm(dir,{recursive:true,force:true}); });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
