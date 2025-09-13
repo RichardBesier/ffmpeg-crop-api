@@ -138,10 +138,11 @@ async function processVideo(inFile, {
   const outFile = join(tmpdir(), `cropapi-${Date.now()}-out.mp4`);
 
   const vf = [
-    crop.text,
-    "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic",                 // even dims
-    downscale ? `scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease` : null,
-  ].filter(Boolean).join(",");
+  crop.text,
+  downscale ? `scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease` : null,
+  "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic" // enforce even final dims
+].filter(Boolean).join(",");
+
 
   await sh("ffmpeg", [
     "-y","-i",inFile,
