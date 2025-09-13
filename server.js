@@ -136,15 +136,14 @@ async function detectWhiteCrop(file, seconds = 6) {
 }
 
 // MOTION: crop to the moving region (ignores static headers/background)
-async function detectMotionCrop(file, seconds = 6) {
+async function detectMotionCrop(file, seconds = 12) {
   const vf =
-    "tblend=all_mode=difference," +      // per-pixel difference from previous frame
+    "tblend=all_mode=difference," +
     "format=gray," +
-    "boxblur=20:1:cr=0:ar=0," +          // smooth speckles / UI edges
-    "lut=y='val>24?255:0'," +            // threshold motion; try 28–32 if too sensitive
-    "bbox=detect=0," +                   // non-black is foreground
+    "boxblur=20:1:cr=0:ar=0," +
+    "lut=y='val>20?255:0'," +   // more sensitive
+    "bbox=detect=0," +
     "metadata=mode=print:key=lavfi.bbox.;file=-";
-
   try {
     const { stderr } = await sh("ffmpeg", [
       "-y","-ss","0","-t",String(seconds),
@@ -152,8 +151,11 @@ async function detectMotionCrop(file, seconds = 6) {
       "-vf", vf, "-f","null","-"
     ]);
     return parseBboxMeta(stderr);
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
+
 
 // ------------------------------
 // Pipelines
