@@ -1,3 +1,4 @@
+// server.js
 import express from "express";
 import axios from "axios";
 import { promises as fs } from "fs";
@@ -7,40 +8,27 @@ import { spawn } from "child_process";
 
 const app = express();
 
-// JSON for /crop URL mode
+// JSON for small control payloads; uploads go through express.raw
 app.use(express.json({ limit: "2mb" }));
-// RAW body for binary upload mode (/crop-upload)
-const rawUpload = express.raw({ type: "*/*", limit: "500mb" });
+const rawUpload = express.raw({ type: "*/*", limit: "200mb" });
 
-// ---------- helpers ----------
+// ------------------------------
+// Utils
+// ------------------------------
 function sh(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args);
     let stdout = "", stderr = "";
     p.stdout.on("data", d => (stdout += d.toString()));
     p.stderr.on("data", d => (stderr += d.toString()));
-    p.on("close", code =>
-      code === 0 ? resolve({ stdout, stderr }) : reject(new Error(stderr || `exit ${code}`))
-    );
+    p.on("close", code => (code === 0 ? resolve({ stdout, stderr }) : reject(new Error(stderr || `exit ${code}`))));
   });
 }
 
 async function downloadToTemp(url) {
   const dir = await fs.mkdtemp(join(tmpdir(), "cropapi-"));
   const file = join(dir, "in.mp4");
-  const resp = await axios.get(url, {
-    responseType: "arraybuffer",
-    timeout: 60000,
-    maxRedirects: 5,
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "video/*,application/octet-stream,*/*",
-      "Referer": "https://www.instagram.com/"
-    }
-  });
-  const ct = (resp.headers["content-type"] || "").toLowerCase();
-  if (!ct.includes("video")) throw new Error(`Source is not video. Content-Type: ${ct || "unknown"}`);
+  const resp = await axios.get(url, { responseType: "arraybuffer", timeout: 120000, headers: { "User-Agent": "Mozilla/5.0" } });
   await fs.writeFile(file, Buffer.from(resp.data));
   return { dir, file };
 }
@@ -48,178 +36,63 @@ async function downloadToTemp(url) {
 async function bufferToTemp(buf) {
   const dir = await fs.mkdtemp(join(tmpdir(), "cropapi-"));
   const file = join(dir, "in.mp4");
-  await fs.writeFile(file, buf);
+  await fs.writeFile(file, Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
   return { dir, file };
 }
 
-// Parse the LAST crop=W:H:X:Y from ffmpeg stderr
+// cropdetect parser: returns {x,y,w,h,text}
 function parseCrop(stderrTxt) {
   const m = [...stderrTxt.matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g)];
   if (!m.length) return null;
-  const last = m[m.length - 1];
-  const w = +last[1], h = +last[2], x = +last[3], y = +last[4];
-  return { w, h, x, y, text: `crop=${w}:${h}:${x}:${y}` };
+  const g = m[m.length - 1];
+  const w = +g[1], h = +g[2], x = +g[3], y = +g[4];
+  return { x, y, w, h, text: `crop=${w}:${h}:${x}:${y}` };
 }
 
-// Run one detection pipeline (returns null on failure instead of throwing)
-async function detectOnce(file, seconds, vf) {
+// bbox metadata parser for motion detector
+function parseBboxMeta(stderrTxt) {
+  const xs = [...stderrTxt.matchAll(/lavfi\.bbox\.x=(\d+)/g)].map(m => +m[1]);
+  const ys = [...stderrTxt.matchAll(/lavfi\.bbox\.y=(\d+)/g)].map(m => +m[1]);
+  const ws = [...stderrTxt.matchAll(/lavfi\.bbox\.w=(\d+)/g)].map(m => +m[1]);
+  const hs = [...stderrTxt.matchAll(/lavfi\.bbox\.h=(\d+)/g)].map(m => +m[1]);
+  if (!xs.length || !ys.length || !ws.length || !hs.length) return null;
+  const x = xs.at(-1), y = ys.at(-1), w = ws.at(-1), h = hs.at(-1);
+  return (w > 0 && h > 0) ? { x, y, w, h, text: `crop=${w}:${h}:${x}:${y}` } : null;
+}
+
+// ------------------------------
+// Detectors
+// ------------------------------
+
+// DARK bars (classic black borders). We keep this for the /crop-upload (black route).
+async function detectDarkCrop(file, seconds = 4) {
+  const vf = "format=gray,boxblur=10:1:cr=0:ar=0,cropdetect=limit=30:round=2:reset=0";
   try {
     const { stderr } = await sh("ffmpeg", [
-      "-y", "-ss", "0", "-t", String(seconds),
-      "-i", file,
-      "-vf", vf,
-      "-f", "null", "-"
+      "-y","-ss","0","-t",String(seconds),
+      "-i",file, "-vf", vf, "-f","null","-"
     ]);
     return parseCrop(stderr);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-// Score crops: prefer removing more area but keep sane size
-function scoreCrop(c, inW, inH) {
-  if (!c) return -1;
-  if (c.w < inW * 0.5 || c.h < inH * 0.5) return -1; // too aggressive
-  const removed = (inW * inH) - (c.w * c.h);
-  const top = c.y, left = c.x, bottom = inH - (c.y + c.h), right = inW - (c.x + c.w);
-  const maxBar = Math.max(top, bottom, left, right);
-  return removed + maxBar * 200; // overweight obvious big bars
-}
-
-// Get input dims
-async function getDims(file) {
-  const { stdout } = await sh("ffprobe", [
-    "-v","error","-select_streams","v:0","-show_entries","stream=width,height","-of","csv=s=x:p=0", file
-  ]);
-  const [w,h] = stdout.trim().split("x").map(n=>parseInt(n,10));
-  return { w, h };
-}
-
-// ---- SMART DETECTOR: dark + bright + edges, with safe limits ----
-async function detectCropSmart(file, seconds) {
-  // Stay within ffmpeg limit range (0..65535). We'll test moderate values.
-  const limits = [30, 45, 60, 75];
-
-  let best = null, bestScore = -1;
-  const { w: inW, h: inH } = await getDims(file);
-
-  for (const lim of limits) {
-    const pipelines = [
-      // dark bars
-      `format=gray,boxblur=24:1:cr=0:ar=0,cropdetect=limit=${lim}:round=2:reset=0`,
-      // bright/white bars (invert)
-      `format=gray,negate,boxblur=24:1:cr=0:ar=0,cropdetect=limit=${lim}:round=2:reset=0`,
-      // any flat-color bars (edges)
-      `format=gray,edgedetect=low=0.08:high=0.2,boxblur=6:1,cropdetect=limit=${lim}:round=2:reset=0`,
-    ];
-
-    const results = await Promise.all(pipelines.map(vf => detectOnce(file, seconds, vf)));
-    for (const c of results) {
-      const s = scoreCrop(c, inW, inH);
-      if (s > bestScore) { best = c; bestScore = s; }
-    }
-    if (bestScore > 0) break; // good enough, stop early
-  }
-
-  return best; // may be null; caller should handle
-}
-
-// ---- main processing (used by both routes) ----
-async function processVideo(inFile, {
-  probeSeconds = 4,
-  targetW = 1080,
-  targetH = 1920,
-  downscale = true,          // set false to keep full res after crop
-} = {}) {
-
-  const crop = await detectCropSmart(inFile, probeSeconds);
-  if (!crop) throw new Error("Could not detect crop");
-
-  const outFile = join(tmpdir(), `cropapi-${Date.now()}-out.mp4`);
-
-  const vf = [
-  crop.text,
-  downscale ? `scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease` : null,
-  "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic" // enforce even final dims
-].filter(Boolean).join(",");
-
-
-  await sh("ffmpeg", [
-    "-y","-i",inFile,
-    "-vf",vf,
-    "-r","30",
-    "-c:v","libx264",
-    "-preset","ultrafast",
-    "-crf","23",
-    "-pix_fmt","yuv420p",
-    "-movflags","+faststart",
-    "-x264-params","bframes=0:ref=1:rc-lookahead=0:keyint=60:min-keyint=60:scenecut=0",
-    "-bf","0",
-    "-threads","2",
-    "-an",
-    "-max_muxing_queue_size","9999",
-    outFile
-  ]);
-
-  return outFile;
-}
-
-// -------- routes --------
-
-// URL mode
-app.post("/crop", async (req, res) => {
-  try {
-    const { url, probeSeconds = 4 } = req.body || {};
-    if (!url) return res.status(400).json({ error: "Missing url" });
-
-    const { dir, file } = await downloadToTemp(url);
-    const outFile = await processVideo(file, { probeSeconds });
-
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
-    res.sendFile(outFile, async ()=>{ await fs.rm(dir,{recursive:true,force:true}); });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: String(e.message || e) });
-  }
-});
-
-// Binary upload mode (recommended)
-app.post("/crop-upload", rawUpload, async (req, res) => {
-  try {
-    if (!req.body || !req.body.length) return res.status(400).json({ error: "No file in body" });
-
-    const { dir, file } = await bufferToTemp(req.body);
-    const outFile = await processVideo(file, { probeSeconds: 4 });
-
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
-    res.sendFile(outFile, async ()=>{ await fs.rm(dir,{recursive:true,force:true}); });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: String(e.message || e) });
-  }
-});
-
-// --- robust white detector (multi-threshold/blur/limit) ---
+// WHITE / light page (title header/footer). Multi-try with thresholds/blurs/limits.
 async function detectWhiteCrop(file, seconds = 6) {
-  const thresholds = [238, 242, 246, 250];   // how “white” the page must be
-  const blurs      = [18, 24, 30];           // hide small black text on white
-  const limits     = [6, 8, 10, 14];         // cropdetect sensitivity
+  const thresholds = [238, 242, 246, 250]; // raise if page is very bright; lower if off-white
+  const blurs      = [18, 24, 30];         // higher hides small black text on white
+  const limits     = [6, 8, 10, 14];
 
   const tryVF = async (vf) => {
     try {
       const { stderr } = await sh("ffmpeg", [
         "-y","-ss","0","-t",String(seconds),
-        "-i",file,
-        "-vf",vf,
-        "-f","null","-"
+        "-i",file, "-vf", vf, "-f","null","-"
       ]);
       return parseCrop(stderr);
     } catch { return null; }
   };
 
-  // input size for scoring (prefer removing more white border)
+  // size & scoring
   const { stdout } = await sh("ffprobe", [
     "-v","error","-select_streams","v:0","-show_entries","stream=width,height",
     "-of","csv=s=x:p=0", file
@@ -227,17 +100,17 @@ async function detectWhiteCrop(file, seconds = 6) {
   const [inW,inH] = stdout.trim().split("x").map(n=>parseInt(n,10));
   const score = (c) => {
     if (!c) return -1;
-    // reject wild trims
+    // don't allow wild over-crops
     if (c.w < inW*0.6 || c.h < inH*0.6) return -1;
     const removed = (inW*inH) - (c.w*c.h);
     const top=c.y, left=c.x, bottom=inH-(c.y+c.h), right=inW-(c.x+c.w);
-    // overweight vertical banners; we won't trim dark pillars anyway
+    // favor trimming vertical white banners; we leave black pillars alone elsewhere
     return removed + Math.max(top,bottom)*400 + Math.max(left,right)*50;
   };
 
   let best=null, bestScore=-1;
 
-  // thresholded white-page pipelines (preferred)
+  // thresholded page (preferred)
   for (const th of thresholds) {
     for (const b of blurs) {
       for (const lim of limits) {
@@ -249,7 +122,7 @@ async function detectWhiteCrop(file, seconds = 6) {
     }
   }
 
-  // light-page fallback: invert + detect (still only trims bright)
+  // invert fallback (sometimes lighter UI benefits)
   for (const b of blurs) {
     for (const lim of limits) {
       const vf = `format=gray,negate,boxblur=${b}:1:cr=0:ar=0,cropdetect=limit=${lim}:round=2:reset=0`;
@@ -259,119 +132,157 @@ async function detectWhiteCrop(file, seconds = 6) {
     }
   }
 
-  return best; // may be null
+  return best;
 }
 
-// --- WHITE background route: trim ONLY white page + title text ---
-app.post("/crop-upload-white", rawUpload, async (req, res) => {
+// MOTION: crop to the moving region (ignores static headers/background)
+async function detectMotionCrop(file, seconds = 6) {
+  const vf =
+    "tblend=all_mode=difference," +      // per-pixel difference from previous frame
+    "format=gray," +
+    "boxblur=20:1:cr=0:ar=0," +          // smooth speckles / UI edges
+    "lut=y='val>24?255:0'," +            // threshold motion; try 28–32 if too sensitive
+    "bbox=detect=0," +                   // non-black is foreground
+    "metadata=mode=print:key=lavfi.bbox.;file=-";
+
   try {
-    if (!req.body || !req.body.length) {
-      return res.status(400).json({ error: "No file in body" });
-    }
-
-    const { dir, file } = await bufferToTemp(req.body);
-
-    // 1) detect + trim white/light banners (top/bottom); leaves black pillars intact
-    const crop1 = await detectWhiteCrop(file, 6);
-    if (!crop1) throw new Error("Could not detect white-page crop");
-
-    const tmp1 = join(tmpdir(), `cropapi-${Date.now()}-w1.mp4`);
-    await sh("ffmpeg", [
-      "-y","-i",file,
-      "-vf",[
-        crop1.text,
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic" // even dims
-      ].join(","),
-      "-c:v","libx264","-preset","ultrafast","-crf","23",
-      "-pix_fmt","yuv420p","-movflags","+faststart",
-      "-an",
-      tmp1
+    const { stderr } = await sh("ffmpeg", [
+      "-y","-ss","0","-t",String(seconds),
+      "-i",file, "-an",
+      "-vf", vf, "-f","null","-"
     ]);
+    return parseBboxMeta(stderr);
+  } catch { return null; }
+}
 
-    // 2) micro-pass (short probe) to shave any 1–2px remnants of white
-    const crop2 = await detectWhiteCrop(tmp1, 2);
-    const outFile = join(tmpdir(), `cropapi-${Date.now()}-white-out.mp4`);
-    const vfFinal = [
-      crop2 ? crop2.text : null,
-      "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic"
-    ].filter(Boolean).join(",");
+// ------------------------------
+// Pipelines
+// ------------------------------
+async function encodeWithCrop(inFile, cropText, outFile) {
+  const vf = [
+    cropText,
+    "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic" // keep encoder-friendly dims
+  ].join(",");
+  await sh("ffmpeg", [
+    "-y","-i", inFile,
+    "-vf", vf,
+    "-c:v","libx264","-preset","ultrafast","-crf","23",
+    "-pix_fmt","yuv420p","-movflags","+faststart",
+    "-an",
+    outFile
+  ]);
+}
 
-    await sh("ffmpeg", [
-      "-y","-i",tmp1,
-      ...(vfFinal ? ["-vf", vfFinal] : []),
-      "-c:v","libx264","-preset","ultrafast","-crf","23",
-      "-pix_fmt","yuv420p","-movflags","+faststart",
-      "-an",
-      outFile
-    ]);
+// ------------------------------
+// Routes
+// ------------------------------
 
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
-    res.sendFile(outFile, async () => {
-      await fs.rm(dir, { recursive: true, force: true });
-      await fs.rm(tmp1, { force: true });
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: String(e.message || e) });
-  }
-});
-
-
-
-// --- WHITE background route (binary upload) ---
-app.post("/crop-upload-white", rawUpload, async (req, res) => {
-  try {
-    if (!req.body || !req.body.length) {
-      return res.status(400).json({ error: "No file in body" });
-    }
-
-    const { dir, file } = await bufferToTemp(req.body);
-
-    // 1) robust white detection on the original
-    const crop1 = await detectWhiteCrop(file, 6);
-    if (!crop1) throw new Error("Could not detect crop on white background");
-
-    // 2) first crop
-    const tmp1 = join(tmpdir(), `cropapi-${Date.now()}-w1.mp4`);
-    await sh("ffmpeg", [
-      "-y","-i",file,
-      "-vf",[ crop1.text, "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic" ].join(","),
-      "-c:v","libx264","-preset","ultrafast","-crf","23",
-      "-pix_fmt","yuv420p","-movflags","+faststart",
-      "-an", tmp1
-    ]);
-
-    // 3) micro-pass to shave tiny leftover lines
-    const crop2 = await detectWhiteCrop(tmp1, 2);
-    const outFile = join(tmpdir(), `cropapi-${Date.now()}-white-out.mp4`);
-    const vfFinal = [
-      crop2 ? crop2.text : null,
-      "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic"
-    ].filter(Boolean).join(",");
-
-    await sh("ffmpeg", [
-      "-y","-i",tmp1,
-      ...(vfFinal ? ["-vf", vfFinal] : []),
-      "-c:v","libx264","-preset","ultrafast","-crf","23",
-      "-pix_fmt","yuv420p","-movflags","+faststart",
-      "-an", outFile
-    ]);
-
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
-    res.sendFile(outFile, async () => {
-      await fs.rm(dir, { recursive: true, force: true });
-      await fs.rm(tmp1, { force: true });
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: String(e.message || e) });
-  }
-});
-
-
-
-
+// Health
 app.get("/", (_, res) => res.send("OK"));
-app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
+
+// Legacy URL route (kept for compatibility). Uses black-bar detection.
+app.post("/crop", async (req, res) => {
+  try {
+    const { url, probeSeconds = 4 } = req.body || {};
+    if (!url) return res.status(400).json({ error: "Missing url" });
+
+    const { dir, file } = await downloadToTemp(url);
+    const crop = await detectDarkCrop(file, probeSeconds);
+    if (!crop) throw new Error("Could not detect crop");
+
+    const outFile = join(tmpdir(), `cropapi-${Date.now()}-out.mp4`);
+    await encodeWithCrop(file, crop.text, outFile);
+
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
+    res.sendFile(outFile, async ()=>{ await fs.rm(dir,{recursive:true,force:true}); });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// BLACK route (binary upload) — trims classic black bars
+app.post("/crop-upload", rawUpload, async (req, res) => {
+  try {
+    if (!req.body || !req.body.length) return res.status(400).json({ error: "No file in body" });
+
+    const { dir, file } = await bufferToTemp(req.body);
+    const crop = await detectDarkCrop(file, 4);
+    if (!crop) throw new Error("Could not detect crop");
+
+    const outFile = join(tmpdir(), `cropapi-${Date.now()}-black.mp4`);
+    await encodeWithCrop(file, crop.text, outFile);
+
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
+    res.sendFile(outFile, async ()=>{ await fs.rm(dir,{recursive:true,force:true}); });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// WHITE route (binary upload) — trims ONLY white/light page (title/footer). Keeps black pillars.
+// Falls back to motion if white detection fails.
+app.post("/crop-upload-white", rawUpload, async (req, res) => {
+  try {
+    if (!req.body || !req.body.length) return res.status(400).json({ error: "No file in body" });
+
+    const { dir, file } = await bufferToTemp(req.body);
+
+    let crop1 = await detectWhiteCrop(file, 6);
+    if (!crop1) {
+      // fallback: crop to moving region (works regardless of page color)
+      crop1 = await detectMotionCrop(file, 6);
+    }
+    if (!crop1) throw new Error("Could not detect white-page or motion crop");
+
+    // first crop
+    const tmp1 = join(tmpdir(), `cropapi-${Date.now()}-w1.mp4`);
+    await encodeWithCrop(file, crop1.text, tmp1);
+
+    // micro-pass to shave 1–2px white leftovers
+    const crop2 = await detectWhiteCrop(tmp1, 2);
+    const outFile = join(tmpdir(), `cropapi-${Date.now()}-white.mp4`);
+    if (crop2) {
+      await encodeWithCrop(tmp1, crop2.text, outFile);
+    } else {
+      // if micro-pass finds nothing, move tmp1 to out
+      await fs.copyFile(tmp1, outFile);
+    }
+
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
+    res.sendFile(outFile, async ()=>{ await fs.rm(dir,{recursive:true,force:true}); await fs.rm(tmp1,{force:true}); });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// MOTION route (binary upload) — crops to moving video region only
+app.post("/crop-upload-motion", rawUpload, async (req, res) => {
+  try {
+    if (!req.body || !req.body.length) return res.status(400).json({ error: "No file in body" });
+
+    const { dir, file } = await bufferToTemp(req.body);
+    const crop = await detectMotionCrop(file, 6);
+    if (!crop) throw new Error("Could not detect motion region");
+
+    const outFile = join(tmpdir(), `cropapi-${Date.now()}-motion.mp4`);
+    await encodeWithCrop(file, crop.text, outFile);
+
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
+    res.sendFile(outFile, async ()=>{ await fs.rm(dir,{recursive:true,force:true}); });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// ------------------------------
+app.listen(process.env.PORT || 8080, () => {
+  console.log("Crop API running on", process.env.PORT || 8080);
+});
