@@ -201,29 +201,87 @@ app.post("/crop-upload", rawUpload, async (req, res) => {
   }
 });
 
-// --- helper: detect crop for WHITE backgrounds only ---
+// --- ADVANCED helper: detect crop for WHITE / light backgrounds ---
 async function detectWhiteCrop(file, seconds = 4) {
-  // Map very bright areas (page) to 0, everything else to 255
-  //  - threshold ~235–245 works well for IG white; adjust if needed
-  const vfThresh =
-    "format=gray," +
-    "lut=y='val>240?0:255'," +       // page (white) -> black, content -> white
-    "boxblur=20:1:cr=0:ar=0," +      // smooth out page text/logos
-    "cropdetect=limit=6:round=2:reset=0";
+  // try multiple combinations; pick the tightest crop that looks sane
+  const thresholds = [236, 240, 244, 248];       // how "white" the page must be
+  const blurs      = [16, 22, 28];               // larger blur hides small black text
+  const limits     = [6, 8, 10, 14];             // cropdetect sensitivity
 
-  try {
-    const { stderr } = await sh("ffmpeg", [
-      "-y", "-ss", "0", "-t", String(seconds),
-      "-i", file,
-      "-vf", vfThresh,
-      "-f", "null", "-"
-    ]);
-    const crop = parseCrop(stderr);
-    return crop;
-  } catch {
-    return null;
+  // candidate pipelines generator
+  const buildPipelines = () => {
+    const vfs = [];
+
+    // 1) Thresholded page (preferred)
+    for (const th of thresholds) {
+      for (const b of blurs) {
+        for (const lim of limits) {
+          vfs.push(
+            `format=gray,lut=y='val>${th}?0:255',boxblur=${b}:1:cr=0:ar=0,cropdetect=limit=${lim}:round=2:reset=0`
+          );
+        }
+      }
+    }
+
+    // 2) Pure invert (bright bars) – sometimes works when threshold misses
+    for (const b of blurs) {
+      for (const lim of limits) {
+        vfs.push(
+          `format=gray,negate,boxblur=${b}:1:cr=0:ar=0,cropdetect=limit=${lim}:round=2:reset=0`
+        );
+      }
+    }
+
+    // 3) Edge-driven fallback (for colored/light pages)
+    vfs.push(`format=gray,edgedetect=low=0.06:high=0.18,boxblur=6:1,cropdetect=limit=30:round=2:reset=0`);
+
+    return vfs;
+  };
+
+  // utility to run one pipeline safely
+  async function tryDetect(vf) {
+    try {
+      const { stderr } = await sh("ffmpeg", [
+        "-y","-ss","0","-t",String(seconds),
+        "-i",file,
+        "-vf",vf,
+        "-f","null","-"
+      ]);
+      return parseCrop(stderr);
+    } catch {
+      return null;
+    }
   }
+
+  // need input dimensions to score
+  const { stdout } = await sh("ffprobe", [
+    "-v","error","-select_streams","v:0",
+    "-show_entries","stream=width,height",
+    "-of","csv=s=x:p=0", file
+  ]);
+  const [inW, inH] = stdout.trim().split("x").map(n => parseInt(n, 10));
+
+  function score(c) {
+    if (!c) return -1;
+    // reject wildly over-aggressive crops
+    if (c.w < inW * 0.5 || c.h < inH * 0.5) return -1;
+    const removed = (inW * inH) - (c.w * c.h);
+    const top = c.y, left = c.x, bottom = inH - (c.y + c.h), right = inW - (c.x + c.w);
+    const maxBar = Math.max(top, bottom, left, right);
+    return removed + maxBar * 200;
+  }
+
+  let best = null, bestScore = -1;
+  const vfs = buildPipelines();
+  for (const vf of vfs) {
+    const c = await tryDetect(vf);
+    const s = score(c);
+    if (s > bestScore) { best = c; bestScore = s; }
+    if (bestScore > 0 && s === bestScore) break; // early exit if already good
+  }
+  return best; // can be null
 }
+
 
 // --- WHITE background route (binary upload) ---
 app.post("/crop-upload-white", rawUpload, async (req, res) => {
@@ -234,45 +292,39 @@ app.post("/crop-upload-white", rawUpload, async (req, res) => {
 
     const { dir, file } = await bufferToTemp(req.body);
 
-    // 1) detect crop on the original using the white-page detector
-    const crop1 = await detectWhiteCrop(file, 4);
+    // 1) robust white detection on the original
+    const crop1 = await detectWhiteCrop(file, 6);
     if (!crop1) throw new Error("Could not detect crop on white background");
 
-    // 2) first crop (to remove header/footer/page)
+    // 2) first crop
     const tmp1 = join(tmpdir(), `cropapi-${Date.now()}-w1.mp4`);
     await sh("ffmpeg", [
-      "-y", "-i", file,
-      "-vf", [
-        crop1.text,
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic", // keep dims even
-      ].join(","),
+      "-y","-i",file,
+      "-vf",[ crop1.text, "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic" ].join(","),
       "-c:v","libx264","-preset","ultrafast","-crf","23",
       "-pix_fmt","yuv420p","-movflags","+faststart",
-      "-an",
-      tmp1
+      "-an", tmp1
     ]);
 
-    // 3) second micro-pass to shave thin leftovers (1–3 px lines)
-    const crop2 = await detectWhiteCrop(tmp1, 2); // short probe is fine
+    // 3) micro-pass to shave tiny leftover lines
+    const crop2 = await detectWhiteCrop(tmp1, 2);
     const outFile = join(tmpdir(), `cropapi-${Date.now()}-white-out.mp4`);
     const vfFinal = [
-      crop2 ? crop2.text : null,                            // apply if found
-      "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic"     // enforce even final dims
+      crop2 ? crop2.text : null,
+      "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic"
     ].filter(Boolean).join(",");
 
     await sh("ffmpeg", [
-      "-y","-i", tmp1,
+      "-y","-i",tmp1,
       ...(vfFinal ? ["-vf", vfFinal] : []),
       "-c:v","libx264","-preset","ultrafast","-crf","23",
       "-pix_fmt","yuv420p","-movflags","+faststart",
-      "-an",
-      outFile
+      "-an", outFile
     ]);
 
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", 'attachment; filename="cropped.mp4"');
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
     res.sendFile(outFile, async () => {
-      // cleanup
       await fs.rm(dir, { recursive: true, force: true });
       await fs.rm(tmp1, { force: true });
     });
@@ -281,6 +333,7 @@ app.post("/crop-upload-white", rawUpload, async (req, res) => {
     res.status(500).json({ error: String(e.message || e) });
   }
 });
+
 
 
 
