@@ -201,42 +201,87 @@ app.post("/crop-upload", rawUpload, async (req, res) => {
   }
 });
 
-// Binary upload mode (white background only)
+// --- helper: detect crop for WHITE backgrounds only ---
+async function detectWhiteCrop(file, seconds = 4) {
+  // Map very bright areas (page) to 0, everything else to 255
+  //  - threshold ~235–245 works well for IG white; adjust if needed
+  const vfThresh =
+    "format=gray," +
+    "lut=y='val>240?0:255'," +       // page (white) -> black, content -> white
+    "boxblur=20:1:cr=0:ar=0," +      // smooth out page text/logos
+    "cropdetect=limit=6:round=2:reset=0";
+
+  try {
+    const { stderr } = await sh("ffmpeg", [
+      "-y", "-ss", "0", "-t", String(seconds),
+      "-i", file,
+      "-vf", vfThresh,
+      "-f", "null", "-"
+    ]);
+    const crop = parseCrop(stderr);
+    return crop;
+  } catch {
+    return null;
+  }
+}
+
+// --- WHITE background route (binary upload) ---
 app.post("/crop-upload-white", rawUpload, async (req, res) => {
   try {
-    if (!req.body || !req.body.length) return res.status(400).json({ error: "No file in body" });
+    if (!req.body || !req.body.length) {
+      return res.status(400).json({ error: "No file in body" });
+    }
 
     const { dir, file } = await bufferToTemp(req.body);
 
-    // Run only the white-background detection
-    const crop = await detectOnce(file, 4,
-      "format=gray,negate,boxblur=24:1:cr=0:ar=0,cropdetect=limit=45:round=2:reset=0"
-    );
-    if (!crop) throw new Error("Could not detect crop");
+    // 1) detect crop on the original using the white-page detector
+    const crop1 = await detectWhiteCrop(file, 4);
+    if (!crop1) throw new Error("Could not detect crop on white background");
 
-    // Use the same encoder, just with this crop
-    const outFile = join(tmpdir(), `cropapi-${Date.now()}-out.mp4`);
-    const vf = [
-      crop.text,
-      "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic"
-    ].join(",");
-
+    // 2) first crop (to remove header/footer/page)
+    const tmp1 = join(tmpdir(), `cropapi-${Date.now()}-w1.mp4`);
     await sh("ffmpeg", [
-      "-y","-i",file,
-      "-vf",vf,
-      "-c:v","libx264","-crf","23","-preset","ultrafast",
+      "-y", "-i", file,
+      "-vf", [
+        crop1.text,
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic", // keep dims even
+      ].join(","),
+      "-c:v","libx264","-preset","ultrafast","-crf","23",
       "-pix_fmt","yuv420p","-movflags","+faststart",
-      "-an", outFile
+      "-an",
+      tmp1
     ]);
 
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition",'attachment; filename="cropped.mp4"');
-    res.sendFile(outFile, async ()=>{ await fs.rm(dir,{recursive:true,force:true}); });
+    // 3) second micro-pass to shave thin leftovers (1–3 px lines)
+    const crop2 = await detectWhiteCrop(tmp1, 2); // short probe is fine
+    const outFile = join(tmpdir(), `cropapi-${Date.now()}-white-out.mp4`);
+    const vfFinal = [
+      crop2 ? crop2.text : null,                            // apply if found
+      "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=bicubic"     // enforce even final dims
+    ].filter(Boolean).join(",");
+
+    await sh("ffmpeg", [
+      "-y","-i", tmp1,
+      ...(vfFinal ? ["-vf", vfFinal] : []),
+      "-c:v","libx264","-preset","ultrafast","-crf","23",
+      "-pix_fmt","yuv420p","-movflags","+faststart",
+      "-an",
+      outFile
+    ]);
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", 'attachment; filename="cropped.mp4"');
+    res.sendFile(outFile, async () => {
+      // cleanup
+      await fs.rm(dir, { recursive: true, force: true });
+      await fs.rm(tmp1, { force: true });
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: String(e.message || e) });
   }
 });
+
 
 
 app.get("/", (_, res) => res.send("OK"));
