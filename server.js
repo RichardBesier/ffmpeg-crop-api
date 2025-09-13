@@ -136,44 +136,95 @@ async function detectWhiteCrop(file, seconds = 6) {
 }
 
 // MOTION: crop to the moving region (ignores static headers/background)
-async function detectMotionCrop(file, seconds = 12) {
-  const vf =
-    "tblend=all_mode=difference," +
-    "format=gray," +
-    "boxblur=20:1:cr=0:ar=0," +
-    "lut=y='val>20?255:0'," +     // lower threshold for sensitivity
-    "bbox=detect=0," +
-    "metadata=mode=print:key=lavfi.bbox.;file=-";
+// Try multiple sensitivity levels, union all bboxes across the probe window
+async function detectMotionCrop(file, seconds = 16) {
+  // We’ll iterate different thresholds + blurs to catch subtle motion
+  const thresholds = [6, 10, 14, 18, 22, 26];  // LOWER = more sensitive
+  const blurs      = [10, 16, 22];             // blur suppresses UI speckles
+  // We also boost contrast a bit to amplify faint differences
 
-  try {
-    const { stderr } = await sh("ffmpeg", [
-      "-y", "-ss", "0", "-t", String(seconds),
-      "-i", file,
-      "-an",
-      "-vf", vf,
-      "-f", "null", "-"
-    ]);
+  // Helper to run one pipeline and return ALL bboxes (arrays)
+  async function runOnce(th, blur) {
+    const vf =
+      "tblend=all_mode=difference," +               // frame-to-previous difference
+      "format=gray," +
+      "eq=contrast=1.4:brightness=0.02," +          // amplify faint diff
+      `boxblur=${blur}:1:cr=0:ar=0,` +
+      `lut=y='val>${th}?255:0',` +                  // threshold motion mask
+      "bbox=detect=0," +                            // non-black = foreground
+      "metadata=mode=print:key=lavfi.bbox.;file=-";
 
-    // Collect all bboxes, not just the last
-    const xs = [...stderr.matchAll(/lavfi\.bbox\.x=(\d+)/g)].map(m => +m[1]);
-    const ys = [...stderr.matchAll(/lavfi\.bbox\.y=(\d+)/g)].map(m => +m[1]);
-    const ws = [...stderr.matchAll(/lavfi\.bbox\.w=(\d+)/g)].map(m => +m[1]);
-    const hs = [...stderr.matchAll(/lavfi\.bbox\.h=(\d+)/g)].map(m => +m[1]);
-
-    if (!xs.length) return null;
-
-    const x1 = Math.min(...xs);
-    const y1 = Math.min(...ys);
-    const x2 = Math.max(...xs.map((x,i)=>x+ws[i]));
-    const y2 = Math.max(...ys.map((y,i)=>y+hs[i]));
-    const w  = x2 - x1;
-    const h  = y2 - y1;
-
-    return (w>0 && h>0) ? { x:x1, y:y1, w, h, text:`crop=${w}:${h}:${x1}:${y1}` } : null;
-  } catch {
-    return null;
+    try {
+      const { stderr } = await sh("ffmpeg", [
+        "-y","-ss","0","-t",String(seconds),
+        "-i",file, "-an",
+        "-vf", vf,
+        "-f","null","-"
+      ]);
+      const xs = [...stderr.matchAll(/lavfi\.bbox\.x=(\d+)/g)].map(m => +m[1]);
+      const ys = [...stderr.matchAll(/lavfi\.bbox\.y=(\d+)/g)].map(m => +m[1]);
+      const ws = [...stderr.matchAll(/lavfi\.bbox\.w=(\d+)/g)].map(m => +m[1]);
+      const hs = [...stderr.matchAll(/lavfi\.bbox\.h=(\d+)/g)].map(m => +m[1]);
+      return (xs.length && ys.length && ws.length && hs.length) ? { xs, ys, ws, hs } : null;
+    } catch {
+      return null;
+    }
   }
+
+  // Try several combos; as soon as any yields boxes, union them
+  for (const blur of blurs) {
+    for (const th of thresholds) {
+      const r = await runOnce(th, blur);
+      if (r) {
+        const x1 = Math.min(...r.xs);
+        const y1 = Math.min(...r.ys);
+        const x2 = Math.max(...r.xs.map((x,i)=>x + r.ws[i]));
+        const y2 = Math.max(...r.ys.map((y,i)=>y + r.hs[i]));
+        const w  = x2 - x1;
+        const h  = y2 - y1;
+        if (w > 0 && h > 0) return { x: x1, y: y1, w, h, text: `crop=${w}:${h}:${x1}:${y1}` };
+      }
+    }
+  }
+
+  // Last resort: extend probe and use the most sensitive settings once more
+  {
+    const r = await (async () => {
+      const vf =
+        "tblend=all_mode=difference," +
+        "format=gray," +
+        "eq=contrast=1.6:brightness=0.03," +
+        "boxblur=16:1:cr=0:ar=0," +
+        "lut=y='val>6?255:0'," +
+        "bbox=detect=0," +
+        "metadata=mode=print:key=lavfi.bbox.;file=-";
+      try {
+        const { stderr } = await sh("ffmpeg", [
+          "-y","-ss","0","-t",String(Math.max(20, seconds)),
+          "-i",file, "-an",
+          "-vf", vf,
+          "-f","null","-"
+        ]);
+        const xs = [...stderr.matchAll(/lavfi\.bbox\.x=(\d+)/g)].map(m => +m[1]);
+        const ys = [...stderr.matchAll(/lavfi\.bbox\.y=(\d+)/g)].map(m => +m[1]);
+        const ws = [...stderr.matchAll(/lavfi\.bbox\.w=(\d+)/g)].map(m => +m[1]);
+        const hs = [...stderr.matchAll(/lavfi\.bbox\.h=(\d+)/g)].map(m => +m[1]);
+        if (!(xs.length && ys.length && ws.length && hs.length)) return null;
+        const x1 = Math.min(...xs);
+        const y1 = Math.min(...ys);
+        const x2 = Math.max(...xs.map((x,i)=>x + ws[i]));
+        const y2 = Math.max(...ys.map((y,i)=>y + hs[i]));
+        const w  = x2 - x1;
+        const h  = y2 - y1;
+        return (w > 0 && h > 0) ? { x: x1, y: y1, w, h, text: `crop=${w}:${h}:${x1}:${y1}` } : null;
+      } catch { return null; }
+    })();
+    if (r) return r;
+  }
+
+  return null;
 }
+
 
 
 
