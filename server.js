@@ -148,5 +148,28 @@ app.post("/crop-upload-white", rawUpload, async (req, res) => {
   }
 });
 
+app.post("/frame", rawUpload, async (req, res) => {
+  try {
+    if (!req.body || !req.body.length) return res.status(400).json({ error: "No file" });
+
+    const { dir, file } = await bufferToTemp(req.body);
+    const outFile = join(tmpdir(), `frame-${Date.now()}.jpg`);
+
+    await sh("ffmpeg", [
+      "-y", "-i", file,
+      "-ss", "00:00:02",   // grab frame at 2 seconds
+      "-vframes", "1",
+      outFile
+    ]);
+
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Content-Disposition", 'inline; filename="frame.jpg"');
+    res.sendFile(outFile, async () => { await fs.rm(dir, { recursive: true, force: true }); });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
