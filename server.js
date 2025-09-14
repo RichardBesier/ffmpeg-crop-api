@@ -60,6 +60,15 @@ async function encodeWithCrop(inFile, cropText, outFile) {
   ]);
 }
 
+// Write a buffer to a temp file with a chosen extension
+async function bufferToTempWithExt(buf, ext = ".bin") {
+  const dir = await fs.mkdtemp(join(tmpdir(), "tpl-"));
+  const file = join(dir, "f" + ext);
+  await fs.writeFile(file, Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
+  return { dir, file };
+}
+
+
 // ------------------------------
 // DETECTORS
 // ------------------------------
