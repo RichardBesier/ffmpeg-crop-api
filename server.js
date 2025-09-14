@@ -255,25 +255,35 @@ const scaleExpr = `scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_
 
    await sh("ffmpeg", [
   "-y",
-  // 0: loop the PNG background at 30fps
-  "-loop", "1", "-framerate", "30", "-i", tFile,
-  // 1: the cropped video
+
+  // 0) Loop the PNG template as a video at 30 fps
+  "-loop", "1", "-framerate", "30", "-i", tFile,   // background/template
+
+  // 1) The cropped video
   "-i", vFile,
 
+  // Build the scene:
+  // - scale the video to 1080 wide, clamp height to <= availH, keep AR, set CFR 30 and fresh timestamps
+  // - overlay video onto the looping template at y=top
   "-filter_complex",
-  `[0:v]setpts=N/(30*TB),format=rgba[bg];` +
-  `[1:v]scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease,fps=30[vid];` +
-  `[bg][vid]overlay=0:${top}:eval=init,format=yuv420p`,
+  `[1:v]scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease,` +
+  `fps=30,setpts=PTS-STARTPTS[vid];` +
+  `[0:v]fps=30,format=rgba[bg];` +
+  `[bg][vid]overlay=0:${top}:eval=init:shortest=1,format=yuv420p`,
 
   "-c:v", "libx264",
   "-preset", "veryfast",
   "-crf", "18",
   "-r", "30",
   "-movflags", "+faststart",
+
+  // -shortest is fine to keep too, but overlay shortest=1 already gates it.
+  "-shortest",
   "-an",
-  "-shortest",               // <<< important fix
+
   outFile
 ]);
+
 
 
 
