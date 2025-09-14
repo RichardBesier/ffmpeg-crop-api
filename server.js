@@ -174,7 +174,7 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
   }
 });
 
-// Place a cropped video onto a 1080x1920 PNG template - SINGLE PASS VERSION
+// Place a cropped video onto a 1080x1920 PNG template - BLACK VIDEO APPROACH
 app.post("/place-on-template",
   upload.fields([{ name: "template" }, { name: "video" }]),
   async (req, res) => {
@@ -198,8 +198,20 @@ app.post("/place-on-template",
 
       console.log(`Files saved: template=${tFile0}, video=${vFile}`);
 
-      // Normalize template to exact 1080x1920
-      console.log("Normalizing template...");
+      // Get video duration
+      const { stdout: durOut } = await sh("ffprobe", [
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=nk=1:nw=1",
+        vFile
+      ]);
+      const videoDuration = parseFloat(durOut || "0");
+      if (videoDuration <= 0) {
+        throw new Error("Could not determine video duration");
+      }
+      console.log(`Video duration: ${videoDuration} seconds`);
+
+      // Normalize template
       const tFile = join(tDir, "template_1080x1920.png");
       await sh("ffmpeg", [
         "-y", "-i", tFile0,
@@ -207,35 +219,32 @@ app.post("/place-on-template",
         "-frames:v", "1",
         tFile
       ]);
-      console.log("Template normalized");
 
       // Calculate available space
       const availH = 1920 - top - safeBottom;
-      console.log(`Available height: ${availH}px`);
-      
       if (availH <= 0) {
         return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
       }
 
-      // Single-pass approach: do everything in one FFmpeg command
-      console.log("Processing video in single pass...");
+      // Use a completely different approach: create black video, overlay template, then overlay video
       const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
       
       await sh("ffmpeg", [
         "-y",
-        "-loop", "1", "-i", tFile,     // Input 0: template (looped)
-        "-i", vFile,                   // Input 1: video
+        "-f", "lavfi", "-i", `color=c=black:s=1080x1920:d=${videoDuration}:r=30`,  // Black background video
+        "-i", tFile,   // Template image
+        "-i", vFile,   // Input video
         "-filter_complex", 
-        `[1:v]scale=1080:${availH}:force_original_aspect_ratio=decrease[scaled];` +
-        `[0:v][scaled]overlay=0:${top}:shortest=1[out]`,
-        "-map", "[out]",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        `[2:v]scale=1080:${availH}:force_original_aspect_ratio=decrease[scaled];` +
+        `[0:v][1:v]overlay=0:0[bg_with_template];` +
+        `[bg_with_template][scaled]overlay=0:${top}`,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
         "-an",
         outFile
       ]);
-      
+
       console.log("Processing complete");
 
       res.setHeader("Content-Type", "video/mp4");
@@ -249,7 +258,6 @@ app.post("/place-on-template",
       
     } catch (e) {
       console.error("Error in place-on-template:", e);
-      console.error("Stack:", e.stack);
       res.status(500).json({ error: String(e.message || e) });
     }
   }
