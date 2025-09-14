@@ -174,13 +174,14 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
   }
 });
 
-// Place a cropped video onto a 1080x1920 PNG template
+// Place a cropped video onto a 1080x1920 PNG template - SIMPLIFIED VERSION
 app.post("/place-on-template",
   upload.fields([{ name: "template" }, { name: "video" }]),
   async (req, res) => {
     try {
       const top = Number(req.query.top ?? NaN);
       const bottom = Number(req.query.bottom ?? 0);
+      
       if (!req.files?.template?.[0] || !req.files?.video?.[0]) {
         return res.status(400).json({ error: "Send 'template' (image) and 'video' (mp4) as form-data files." });
       }
@@ -193,72 +194,83 @@ app.post("/place-on-template",
       const { dir: tDir, file: tFile0 } = await bufferToTempWithExt(req.files.template[0].buffer, ".png");
       const { dir: vDir, file: vFile }  = await bufferToTempWithExt(req.files.video[0].buffer, ".mp4");
 
-      // normalize template to exact 1080x1920 (single frame)
+      // Step 1: Get video duration first
+      const { stdout: durOut } = await sh("ffprobe", [
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=nk=1:nw=1",
+        vFile
+      ]);
+      const videoDuration = parseFloat(durOut || "0");
+      if (videoDuration <= 0) {
+        throw new Error("Could not determine video duration");
+      }
+
+      // Step 2: Normalize template to exact 1080x1920
       const tFile = join(tDir, "template_1080x1920.png");
       await sh("ffmpeg", [
         "-y", "-i", tFile0,
-        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(1080-iw)/2:(1920-ih)/2",
+        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(1080-iw)/2:(1920-ih)/2:color=black",
         "-frames:v", "1",
         tFile
       ]);
 
-      // video duration (ceil seconds) for looping PNG
-      const { stdout: durOut } = await sh("ffprobe", [
-        "-v","error",
-        "-show_entries","format=duration",
-        "-of","default=nk=1:nw=1",
-        vFile
+      // Step 3: Create a video from the template with the same duration as the input video
+      const templateVideoFile = join(tDir, "template_video.mp4");
+      await sh("ffmpeg", [
+        "-y",
+        "-loop", "1", 
+        "-i", tFile,
+        "-t", String(videoDuration),
+        "-r", "30",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        templateVideoFile
       ]);
-      const vidDuration = Math.max(1, Math.ceil(parseFloat(durOut || "0")));
 
-      // available space for the video box
+      // Step 4: Calculate available space and scale the input video
       const availH = 1920 - top - safeBottom;
       if (availH <= 0) {
         return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
       }
 
-      const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
-
-      // filter:
-      //   - scale video to width 1080, height clamped to availH (keep AR), set CFR 30 & fresh PTS
-      //   - overlay on the looping PNG at y=top, stop on shortest
-      const filter = [
-        `[1:v]scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease,fps=30,setpts=PTS-STARTPTS[vid]`,
-        `[0:v]fps=30,format=rgba[bg]`,
-        `[bg][vid]overlay=0:${top}:eval=init:shortest=1,format=yuv420p`
-      ].join(";");
-
+      const scaledVideoFile = join(vDir, "scaled_video.mp4");
       await sh("ffmpeg", [
-  "-y",
+        "-y", "-i", vFile,
+        "-vf", `scale=1080:${availH}:force_original_aspect_ratio=decrease`,
+        "-r", "30",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        scaledVideoFile
+      ]);
 
-  // 0) loop the template PNG forever as a video stream
-  "-loop", "1", "-i", tFile,     // 0:v (background)
+      // Step 5: Overlay the scaled video onto the template video
+      const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
+      await sh("ffmpeg", [
+        "-y",
+        "-i", templateVideoFile,  // background
+        "-i", scaledVideoFile,    // overlay
+        "-filter_complex", `[0:v][1:v]overlay=0:${top}`,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        "-an",  // no audio
+        outFile
+      ]);
 
-  // 1) the cropped video
-  "-i", vFile,                   // 1:v
-
-  // Build scene:
-  // - scale the video to width=1080, clamp height to <= availH (keep AR)
-  // - reset timestamps on BOTH streams so they start at 0
-  // - overlay video at y=top
-  "-filter_complex",
-  `[1:v]scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease,` +
-  `setpts=PTS-STARTPTS[vid];` +
-  `[0:v]format=rgba,setpts=PTS-STARTPTS[bg];` +
-  `[bg][vid]overlay=0:${top}:eval=init:shortest=1,format=yuv420p`,
-
-  // encode
-  "-r", "30",
-  "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-  "-movflags", "+faststart",
-
-  // stop when the video stream ends even though the PNG loops forever
-  "-shortest",
-  "-an",
-
-  outFile
-]);
-
+      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
+      res.sendFile(outFile, async () => {
+        await fs.rm(tDir, { recursive: true, force: true });
+        await fs.rm(vDir, { recursive: true, force: true });
+      });
+      
+    } catch (e) {
+      console.error("Error in place-on-template:", e);
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  }
+);
 
       res.setHeader("Content-Type", "video/mp4");
       res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
