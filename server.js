@@ -182,6 +182,8 @@ app.post("/place-on-template",
       const top = Number(req.query.top ?? NaN);
       const bottom = Number(req.query.bottom ?? 0);
       
+      console.log(`Processing request: top=${top}, bottom=${bottom}`);
+      
       if (!req.files?.template?.[0] || !req.files?.video?.[0]) {
         return res.status(400).json({ error: "Send 'template' (image) and 'video' (mp4) as form-data files." });
       }
@@ -194,7 +196,10 @@ app.post("/place-on-template",
       const { dir: tDir, file: tFile0 } = await bufferToTempWithExt(req.files.template[0].buffer, ".png");
       const { dir: vDir, file: vFile }  = await bufferToTempWithExt(req.files.video[0].buffer, ".mp4");
 
+      console.log(`Files saved: template=${tFile0}, video=${vFile}`);
+
       // Step 1: Get video duration first
+      console.log("Getting video duration...");
       const { stdout: durOut } = await sh("ffprobe", [
         "-v", "error",
         "-show_entries", "format=duration",
@@ -202,11 +207,14 @@ app.post("/place-on-template",
         vFile
       ]);
       const videoDuration = parseFloat(durOut || "0");
+      console.log(`Video duration: ${videoDuration} seconds`);
+      
       if (videoDuration <= 0) {
         throw new Error("Could not determine video duration");
       }
 
       // Step 2: Normalize template to exact 1080x1920
+      console.log("Normalizing template...");
       const tFile = join(tDir, "template_1080x1920.png");
       await sh("ffmpeg", [
         "-y", "-i", tFile0,
@@ -214,8 +222,32 @@ app.post("/place-on-template",
         "-frames:v", "1",
         tFile
       ]);
+      console.log("Template normalized");
 
-      // Step 3: Create a video from the template with the same duration as the input video
+      // Step 3: Calculate available space and scale the input video first
+      const availH = 1920 - top - safeBottom;
+      console.log(`Available height: ${availH}px`);
+      
+      if (availH <= 0) {
+        return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
+      }
+
+      console.log("Scaling input video...");
+      const scaledVideoFile = join(vDir, "scaled_video.mp4");
+      await sh("ffmpeg", [
+        "-y", "-i", vFile,
+        "-vf", `scale=1080:${availH}:force_original_aspect_ratio=decrease`,
+        "-t", String(videoDuration), // Ensure same duration
+        "-r", "30",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-avoid_negative_ts", "make_zero",
+        scaledVideoFile
+      ]);
+      console.log("Video scaled");
+
+      // Step 4: Create template video with same duration
+      console.log("Creating template video...");
       const templateVideoFile = join(tDir, "template_video.mp4");
       await sh("ffmpeg", [
         "-y",
@@ -223,63 +255,43 @@ app.post("/place-on-template",
         "-i", tFile,
         "-t", String(videoDuration),
         "-r", "30",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-pix_fmt", "yuv420p",
+        "-avoid_negative_ts", "make_zero",
         templateVideoFile
       ]);
-
-      // Step 4: Calculate available space and scale the input video
-      const availH = 1920 - top - safeBottom;
-      if (availH <= 0) {
-        return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
-      }
-
-      const scaledVideoFile = join(vDir, "scaled_video.mp4");
-      await sh("ffmpeg", [
-        "-y", "-i", vFile,
-        "-vf", `scale=1080:${availH}:force_original_aspect_ratio=decrease`,
-        "-r", "30",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        scaledVideoFile
-      ]);
+      console.log("Template video created");
 
       // Step 5: Overlay the scaled video onto the template video
+      console.log("Performing overlay...");
       const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
       await sh("ffmpeg", [
         "-y",
         "-i", templateVideoFile,  // background
         "-i", scaledVideoFile,    // overlay
         "-filter_complex", `[0:v][1:v]overlay=0:${top}`,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-t", String(videoDuration),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
+        "-avoid_negative_ts", "make_zero",
         "-an",  // no audio
         outFile
       ]);
+      console.log("Overlay complete");
 
       res.setHeader("Content-Type", "video/mp4");
       res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
-      res.sendFile(outFile, async () => {
+      res.sendFile(outFile, async (err) => {
+        if (err) console.error("Send file error:", err);
         await fs.rm(tDir, { recursive: true, force: true });
         await fs.rm(vDir, { recursive: true, force: true });
+        console.log("Cleanup complete");
       });
       
     } catch (e) {
       console.error("Error in place-on-template:", e);
-      res.status(500).json({ error: String(e.message || e) });
-    }
-  }
-);
-
-      res.setHeader("Content-Type", "video/mp4");
-      res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
-      res.sendFile(outFile, async () => {
-        await fs.rm(tDir, { recursive: true, force: true });
-        await fs.rm(vDir, { recursive: true, force: true });
-      });
-    } catch (e) {
-      console.error(e);
+      console.error("Stack:", e.stack);
       res.status(500).json({ error: String(e.message || e) });
     }
   }
