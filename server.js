@@ -198,6 +198,89 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
   }
 });
 
+// add at top if not present
+import multer from "multer";
+const upload = multer();
+
+// helper to write any buffer to a temp file with desired extension
+async function bufferToTempWithExt(buf, ext = ".bin") {
+  const { mkdtemp, writeFile } = fs;
+  const dir = await mkdtemp(join(tmpdir(), "tpl-"));
+  const file = join(dir, "f" + ext);
+  await writeFile(file, buf);
+  return { dir, file };
+}
+
+/**
+ * POST /place-on-template?top=###&bottom=###
+ * form-data:
+ *   - template: (file) PNG/JPG 1080x1920
+ *   - video:    (file) MP4
+ */
+app.post("/place-on-template", upload.fields([{ name: "template" }, { name: "video" }]), async (req, res) => {
+  try {
+    const top = Number(req.query.top ?? NaN);
+    const bottom = Number(req.query.bottom ?? 0);
+    if (!req.files?.template?.[0] || !req.files?.video?.[0]) {
+      return res.status(400).json({ error: "Send 'template' (image) and 'video' (mp4) as form-data files." });
+    }
+    if (!Number.isFinite(top) || top < 0 || top > 1800) {
+      return res.status(400).json({ error: "Query param 'top' (pixels) is required and must be reasonable." });
+    }
+    const safeBottom = Number.isFinite(bottom) && bottom >= 0 ? bottom : 0;
+
+    // save inputs
+    const { dir: tDir, file: tFile0 } = await bufferToTempWithExt(req.files.template[0].buffer, ".png");
+    const { dir: vDir, file: vFile }  = await bufferToTempWithExt(req.files.video[0].buffer, ".mp4");
+
+    // Normalize template to exact 1080x1920 in case it isn't already
+    const tFile = join(tDir, "template_1080x1920.png");
+    await sh("ffmpeg", [
+      "-y", "-i", tFile0,
+      "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(1080-iw)/2:(1920-ih)/2",
+      "-frames:v", "1",
+      tFile
+    ]);
+
+    const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
+
+    // available height under the header
+    const availH = 1920 - top - safeBottom;
+    if (availH <= 0) {
+      return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
+    }
+
+    // Build filter:
+    // 1) scale video to width=1080, height=min(availH, ih*1080/iw) (i.e., fit within box)
+    // 2) overlay onto normalized template at y=top
+    const scaleExpr = `scale=1080:min(${availH},ih*1080/iw):force_original_aspect_ratio=decrease`;
+    const filter = `[1:v]${scaleExpr}[vid];[0:v][vid]overlay=0:${top},format=yuv420p`;
+
+    await sh("ffmpeg", [
+      "-y",
+      "-i", tFile,   // 0: template 1080x1920
+      "-i", vFile,   // 1: video
+      "-filter_complex", filter,
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "18",
+      "-movflags", "+faststart",
+      "-an",
+      outFile
+    ]);
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
+    res.sendFile(outFile, async () => {
+      await fs.rm(tDir, { recursive: true, force: true });
+      await fs.rm(vDir, { recursive: true, force: true });
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 
 
 app.get("/", (_, res) => res.send("OK"));
