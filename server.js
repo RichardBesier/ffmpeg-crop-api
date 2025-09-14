@@ -301,5 +301,94 @@ app.post("/place-on-template",
   }
 );
 
+// Minimal debug approach - just try to copy the video first
+app.post("/place-on-template-debug",
+  upload.fields([{ name: "template" }, { name: "video" }]),
+  async (req, res) => {
+    try {
+      console.log("Starting minimal debug test...");
+      
+      const { dir: vDir, file: vFile } = await bufferToTempWithExt(req.files.video[0].buffer, ".mp4");
+      console.log(`Video file saved: ${vFile}`);
+
+      // Test 1: Can we just copy the video?
+      const outFile1 = join(tmpdir(), `test1-${Date.now()}.mp4`);
+      console.log("Test 1: Simple copy...");
+      await sh("ffmpeg", [
+        "-y", "-i", vFile,
+        "-c", "copy", // Just copy, no re-encoding
+        outFile1
+      ]);
+      console.log("Test 1: PASSED - Simple copy works");
+
+      // Test 2: Can we re-encode the video?
+      const outFile2 = join(tmpdir(), `test2-${Date.now()}.mp4`);
+      console.log("Test 2: Simple re-encode...");
+      await sh("ffmpeg", [
+        "-y", "-i", vFile,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        outFile2
+      ]);
+      console.log("Test 2: PASSED - Re-encode works");
+
+      // Test 3: Can we scale the video?
+      const outFile3 = join(tmpdir(), `test3-${Date.now()}.mp4`);
+      console.log("Test 3: Scale video...");
+      await sh("ffmpeg", [
+        "-y", "-i", vFile,
+        "-vf", "scale=1080:1344",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        outFile3
+      ]);
+      console.log("Test 3: PASSED - Scale works");
+
+      // Test 4: Try the simplest possible overlay with a black background
+      const outFile4 = join(tmpdir(), `test4-${Date.now()}.mp4`);
+      console.log("Test 4: Overlay on black background...");
+      
+      // Get duration first
+      const { stdout: durOut } = await sh("ffprobe", [
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=nk=1:nw=1",
+        vFile
+      ]);
+      const duration = parseFloat(durOut || "5");
+      console.log(`Duration: ${duration}s`);
+      
+      await sh("ffmpeg", [
+        "-y",
+        "-f", "lavfi", "-i", `color=black:s=1080x1920:d=${duration}:r=30`,
+        "-i", vFile,
+        "-filter_complex", "[1:v]scale=1080:1344[scaled];[0:v][scaled]overlay=0:300",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-t", String(duration),
+        "-an",
+        outFile4
+      ]);
+      console.log("Test 4: PASSED - Basic overlay works");
+
+      // If we get here, return the working overlay
+      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Content-Disposition", 'attachment; filename="test-overlay.mp4"');
+      res.sendFile(outFile4, async (err) => {
+        if (err) console.error("Send file error:", err);
+        await fs.rm(vDir, { recursive: true, force: true });
+        console.log("Debug test complete");
+      });
+      
+    } catch (e) {
+      console.error("Debug test failed at:", e.message);
+      console.error("Stack:", e.stack);
+      res.status(500).json({ error: `Debug failed: ${e.message}` });
+    }
+  }
+);
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
