@@ -254,17 +254,21 @@ const scaleExpr = `scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_
     const filter = `[1:v]${scaleExpr}[vid];[0:v][vid]overlay=0:${top},format=yuv420p`;
 
     await sh("ffmpeg", [
-      "-y",
-      "-i", tFile,   // 0: template 1080x1920
-      "-i", vFile,   // 1: video
-      "-filter_complex", filter,
-      "-c:v", "libx264",
-      "-preset", "veryfast",
-      "-crf", "18",
-      "-movflags", "+faststart",
-      "-an",
-      outFile
-    ]);
+  "-y",
+  // loop the template image so it stays visible during whole video
+  "-loop", "1", "-i", tFile,   // 0: template 1080x1920
+  "-i", vFile,                 // 1: video
+  "-filter_complex", `[1:v]${scaleExpr}[vid];[0:v][vid]overlay=0:${top},format=yuv420p`,
+  "-c:v", "libx264",
+  "-preset", "veryfast",
+  "-crf", "18",
+  "-r", "30",                  // stable fps
+  "-movflags", "+faststart",
+  "-shortest",                 // stop when video ends
+  "-an",
+  outFile
+]);
+
 
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
