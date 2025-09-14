@@ -174,7 +174,7 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
   }
 });
 
-// Place a cropped video onto a 1080x1920 PNG template - NO OVERLAY APPROACH
+// Place a cropped video onto a 1080x1920 PNG template - WORKING VERSION
 app.post("/place-on-template",
   upload.fields([{ name: "template" }, { name: "video" }]),
   async (req, res) => {
@@ -212,7 +212,7 @@ app.post("/place-on-template",
         throw new Error("Could not determine video duration");
       }
 
-      // Normalize template
+      // Normalize template to exact 1080x1920
       const tFile = join(tDir, "template_1080x1920.png");
       await sh("ffmpeg", [
         "-y", "-i", tFile0,
@@ -229,55 +229,31 @@ app.post("/place-on-template",
         return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
       }
 
-      // Approach: Create the template image with the video content "baked in"
-      // This avoids overlay filters entirely
-      
-      // Step 1: Scale video to fit and pad with transparent/black areas
-      console.log("Step 1: Processing video with positioning...");
-      const processedVideo = join(vDir, "positioned.mp4");
-      
-      // Create a filter that:
-      // 1. Scales the video to fit the available space
-      // 2. Pads it to full 1080x1920 with the video positioned at the right place
-      const vf = [
-        `scale=1080:${availH}:force_original_aspect_ratio=decrease`,
-        `pad=1080:1920:0:${top}:black`
-      ].join(',');
-      
+      // Create template video background (like the working debug test)
+      console.log("Creating template background...");
+      const templateVideo = join(tDir, "template_bg.mp4");
       await sh("ffmpeg", [
-        "-y", "-i", vFile,
-        "-vf", vf,
+        "-y",
+        "-loop", "1", "-i", tFile,
+        "-t", String(videoDuration),
+        "-r", "30",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-pix_fmt", "yuv420p",
-        "-r", "30",
-        processedVideo
+        templateVideo
       ]);
 
-      // Step 2: Create template as an overlay image
-      console.log("Step 2: Creating template overlay...");
-      const templateOverlay = join(tDir, "overlay.png");
-      
-      // Make the template areas where video should show through transparent
-      // This creates a "mask" effect
-      await sh("ffmpeg", [
-        "-y", "-i", tFile,
-        "-vf", `geq=r='if(between(Y,${top},${top + availH}),0,r(X,Y))':g='if(between(Y,${top},${top + availH}),0,g(X,Y))':b='if(between(Y,${top},${top + availH}),0,b(X,Y))':a='if(between(Y,${top},${top + availH}),0,255)'`,
-        "-frames:v", "1",
-        templateOverlay
-      ]);
-
-      // Step 3: Simple blend the template onto the positioned video
-      console.log("Step 3: Final composition...");
+      // Final composition using the same approach as the working debug test
+      console.log("Final composition...");
       const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
       
       await sh("ffmpeg", [
         "-y",
-        "-i", processedVideo,
-        "-i", templateOverlay,
-        "-filter_complex", "blend=all_mode=normal:all_opacity=1",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-i", templateVideo,  // Template background
+        "-i", vFile,          // Input video
+        "-filter_complex", `[1:v]scale=1080:${availH}:force_original_aspect_ratio=decrease[scaled];[0:v][scaled]overlay=0:${top}`,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
+        "-t", String(videoDuration),
         "-an",
         outFile
       ]);
