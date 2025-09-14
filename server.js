@@ -1,11 +1,18 @@
 // server.js — SIMPLE ROLLBACK (black + white routes only)
 import express from "express";
+import multer from "multer"; 
 import { promises as fs } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawn } from "child_process";
 
 const app = express();
+
+// RAW body for binary upload
+const rawUpload = express.raw({ type: "*/*", limit: "500mb" });
+
+// Multer instance for form-data uploads (needed by /place-on-template)
+const upload = multer();
 
 // RAW body for binary upload (send the MP4 as the request body)
 const rawUpload = express.raw({ type: "*/*", limit: "500mb" });
@@ -198,25 +205,7 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
   }
 });
 
-// add at top if not present
-import multer from "multer";
-const upload = multer();
 
-// helper to write any buffer to a temp file with desired extension
-async function bufferToTempWithExt(buf, ext = ".bin") {
-  const { mkdtemp, writeFile } = fs;
-  const dir = await mkdtemp(join(tmpdir(), "tpl-"));
-  const file = join(dir, "f" + ext);
-  await writeFile(file, buf);
-  return { dir, file };
-}
-
-/**
- * POST /place-on-template?top=###&bottom=###
- * form-data:
- *   - template: (file) PNG/JPG 1080x1920
- *   - video:    (file) MP4
- */
 app.post("/place-on-template", upload.fields([{ name: "template" }, { name: "video" }]), async (req, res) => {
   try {
     const top = Number(req.query.top ?? NaN);
@@ -253,7 +242,8 @@ app.post("/place-on-template", upload.fields([{ name: "template" }, { name: "vid
     // Build filter:
     // 1) scale video to width=1080, height=min(availH, ih*1080/iw) (i.e., fit within box)
     // 2) overlay onto normalized template at y=top
-    const scaleExpr = `scale=1080:min(${availH},ih*1080/iw):force_original_aspect_ratio=decrease`;
+    // escape the comma for ffmpeg filtergraph: use "\," (double-slash in JS string)
+const scaleExpr = `scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease`;
     const filter = `[1:v]${scaleExpr}[vid];[0:v][vid]overlay=0:${top},format=yuv420p`;
 
     await sh("ffmpeg", [
