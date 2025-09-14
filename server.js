@@ -253,21 +253,29 @@ app.post("/place-on-template", upload.fields([{ name: "template" }, { name: "vid
 const scaleExpr = `scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease`;
     const filter = `[1:v]${scaleExpr}[vid];[0:v][vid]overlay=0:${top},format=yuv420p`;
 
-    await sh("ffmpeg", [
+   await sh("ffmpeg", [
   "-y",
-  // loop the template image so it stays visible during whole video
-  "-loop", "1", "-i", tFile,   // 0: template 1080x1920
-  "-i", vFile,                 // 1: video
-  "-filter_complex", `[1:v]${scaleExpr}[vid];[0:v][vid]overlay=0:${top},format=yuv420p`,
+  // 0: loop the PNG as a video background at 30 fps
+  "-loop", "1", "-framerate", "30", "-i", tFile,
+  // 1: the cropped video
+  "-i", vFile,
+
+  // filter: timestamp-fix for bg, scale video to fit width 1080 and <= availH, then overlay at y=top
+  "-filter_complex",
+  `[0:v]setpts=N/(30*TB),format=rgba[bg];` +
+  `[1:v]scale=1080\\:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease,fps=30[vid];` +
+  `[bg][vid]overlay=0:${top}:eval=init,format=yuv420p`,
+
   "-c:v", "libx264",
   "-preset", "veryfast",
   "-crf", "18",
-  "-r", "30",                  // stable fps
+  "-r", "30",
   "-movflags", "+faststart",
-  "-shortest",                 // stop when video ends
+  "-shortest",              // stop when the video (input 1) ends
   "-an",
   outFile
 ]);
+
 
 
     res.setHeader("Content-Type", "video/mp4");
