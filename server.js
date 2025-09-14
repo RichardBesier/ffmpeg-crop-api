@@ -1,21 +1,19 @@
 // server.js — SIMPLE ROLLBACK (black + white routes only)
 import express from "express";
-import multer from "multer"; 
 import { promises as fs } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawn } from "child_process";
+import multer from "multer";
 
 const app = express();
+app.use(express.json({ limit: "2mb" }));
 
 // RAW body for binary upload
 const rawUpload = express.raw({ type: "*/*", limit: "500mb" });
 
 // Multer instance for form-data uploads (needed by /place-on-template)
 const upload = multer();
-
-// RAW body for binary upload (send the MP4 as the request body)
-const rawUpload = express.raw({ type: "*/*", limit: "500mb" });
 
 // ------------------------------
 // helpers
