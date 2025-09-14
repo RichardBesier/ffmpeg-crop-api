@@ -246,47 +246,48 @@ app.post("/place-on-template", upload.fields([{ name: "template" }, { name: "vid
       return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
     }
 
-    // Build filter:
-    // 1) scale video to width=1080, height=min(availH, ih*1080/iw) (i.e., fit within box)
-    // 2) overlay onto normalized template at y=top
-    // escape the comma for ffmpeg filtergraph: use "\," (double-slash in JS string)
-const scaleExpr = `scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease`;
-    const filter = `[1:v]${scaleExpr}[vid];[0:v][vid]overlay=0:${top},format=yuv420p`;
+  // get video duration in seconds (ceil) via ffprobe
+const { stdout: durOut } = await sh("ffprobe", [
+  "-v","error","-select_streams","v:0",
+  "-show_entries","format=duration",
+  "-of","default=nk=1:nw=1", vFile
+]);
+const vidDuration = Math.max(1, Math.ceil(parseFloat(durOut || "0")));
 
-   await sh("ffmpeg", [
+// final output path
+const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
+
+// Build a simple, robust filter:
+// - scale video to fit width=1080, clamp height to available box (top/bottom)
+// - overlay at y=top
+const availH = 1920 - top - safeBottom;
+if (availH <= 0) {
+  return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
+}
+
+// NB: eval=init prevents re-evaluating expressions per frame; keeps it fast & stable.
+const filter = [
+  `[1:v]scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease[vid]`,
+  `[0:v][vid]overlay=0:${top}:eval=init,format=yuv420p`
+].join(";");
+
+// Important bits:
+// - **-loop 1** on the template input (turns PNG into a continuous stream)
+// - **-t <vidDuration>** so the loop lasts exactly as long as the video
+// - **-shortest** to end when the shortest stream ends (the video)
+// - explicit **-r 30** output framerate for consistency
+await sh("ffmpeg", [
   "-y",
-
-  // 0) Loop the PNG template as a video at 30 fps
-  "-loop", "1", "-framerate", "30", "-i", tFile,   // background/template
-
-  // 1) The cropped video
-  "-i", vFile,
-
-  // Build the scene:
-  // - scale the video to 1080 wide, clamp height to <= availH, keep AR, set CFR 30 and fresh timestamps
-  // - overlay video onto the looping template at y=top
-  "-filter_complex",
-  `[1:v]scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease,` +
-  `fps=30,setpts=PTS-STARTPTS[vid];` +
-  `[0:v]fps=30,format=rgba[bg];` +
-  `[bg][vid]overlay=0:${top}:eval=init:shortest=1,format=yuv420p`,
-
-  "-c:v", "libx264",
-  "-preset", "veryfast",
-  "-crf", "18",
-  "-r", "30",
-  "-movflags", "+faststart",
-
-  // -shortest is fine to keep too, but overlay shortest=1 already gates it.
-  "-shortest",
+  "-loop","1","-t", String(vidDuration), "-i", tFile,  // 0: looped template
+  "-i", vFile,                                        // 1: the video
+  "-filter_complex", filter,
+  "-r","30",
+  "-c:v","libx264","-preset","veryfast","-crf","18",
+  "-movflags","+faststart",
   "-an",
-
+  "-shortest",
   outFile
 ]);
-
-
-
-
 
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
@@ -299,8 +300,6 @@ const scaleExpr = `scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_
     res.status(500).json({ error: String(e.message || e) });
   }
 });
-
-
 
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
