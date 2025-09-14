@@ -174,7 +174,7 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
   }
 });
 
-// Place a cropped video onto a 1080x1920 PNG template - BLACK VIDEO APPROACH
+// Place a cropped video onto a 1080x1920 PNG template - STEP BY STEP APPROACH
 app.post("/place-on-template",
   upload.fields([{ name: "template" }, { name: "video" }]),
   async (req, res) => {
@@ -198,20 +198,27 @@ app.post("/place-on-template",
 
       console.log(`Files saved: template=${tFile0}, video=${vFile}`);
 
-      // Get video duration
-      const { stdout: durOut } = await sh("ffprobe", [
+      // Get video duration and frame rate
+      const { stdout: probeOut } = await sh("ffprobe", [
         "-v", "error",
-        "-show_entries", "format=duration",
+        "-select_streams", "v:0",
+        "-show_entries", "format=duration:stream=r_frame_rate",
         "-of", "default=nk=1:nw=1",
         vFile
       ]);
-      const videoDuration = parseFloat(durOut || "0");
+      
+      const lines = probeOut.trim().split('\n');
+      const frameRate = lines.find(l => l.includes('/')) || "30/1";
+      const videoDuration = parseFloat(lines.find(l => !l.includes('/')) || "10");
+      
+      console.log(`Video duration: ${videoDuration}s, frame rate: ${frameRate}`);
+
       if (videoDuration <= 0) {
         throw new Error("Could not determine video duration");
       }
-      console.log(`Video duration: ${videoDuration} seconds`);
 
-      // Normalize template
+      // Step 1: Normalize template to exact 1080x1920
+      console.log("Step 1: Normalizing template...");
       const tFile = join(tDir, "template_1080x1920.png");
       await sh("ffmpeg", [
         "-y", "-i", tFile0,
@@ -220,24 +227,47 @@ app.post("/place-on-template",
         tFile
       ]);
 
-      // Calculate available space
+      // Step 2: Calculate available space and create a mask/crop for the video
       const availH = 1920 - top - safeBottom;
+      console.log(`Available height: ${availH}px`);
+      
       if (availH <= 0) {
         return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
       }
 
-      // Use a completely different approach: create black video, overlay template, then overlay video
-      const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
-      
+      // Step 3: Scale the input video to fit the available space
+      console.log("Step 2: Scaling input video...");
+      const scaledVideo = join(vDir, "scaled.mp4");
+      await sh("ffmpeg", [
+        "-y", "-i", vFile,
+        "-vf", `scale=1080:${availH}:force_original_aspect_ratio=decrease`,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-r", "30", // Force consistent frame rate
+        scaledVideo
+      ]);
+
+      // Step 4: Convert template to a video with the same duration as the input
+      console.log("Step 3: Creating template video...");
+      const templateVideo = join(tDir, "template.mp4");
       await sh("ffmpeg", [
         "-y",
-        "-f", "lavfi", "-i", `color=c=black:s=1080x1920:d=${videoDuration}:r=30`,  // Black background video
-        "-i", tFile,   // Template image
-        "-i", vFile,   // Input video
-        "-filter_complex", 
-        `[2:v]scale=1080:${availH}:force_original_aspect_ratio=decrease[scaled];` +
-        `[0:v][1:v]overlay=0:0[bg_with_template];` +
-        `[bg_with_template][scaled]overlay=0:${top}`,
+        "-loop", "1", "-i", tFile,
+        "-t", String(videoDuration),
+        "-r", "30", // Match the scaled video frame rate
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        templateVideo
+      ]);
+
+      // Step 5: Simple overlay - just overlay the scaled video on the template video
+      console.log("Step 4: Final overlay...");
+      const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
+      await sh("ffmpeg", [
+        "-y",
+        "-i", templateVideo,
+        "-i", scaledVideo,
+        "-filter_complex", `overlay=0:${top}`,
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
@@ -245,7 +275,7 @@ app.post("/place-on-template",
         outFile
       ]);
 
-      console.log("Processing complete");
+      console.log("Processing complete!");
 
       res.setHeader("Content-Type", "video/mp4");
       res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
@@ -258,6 +288,7 @@ app.post("/place-on-template",
       
     } catch (e) {
       console.error("Error in place-on-template:", e);
+      console.error("Stack:", e.stack);
       res.status(500).json({ error: String(e.message || e) });
     }
   }
