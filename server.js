@@ -229,17 +229,36 @@ app.post("/place-on-template",
       ].join(";");
 
       await sh("ffmpeg", [
-        "-y",
-        "-loop","1","-framerate","30","-t", String(vidDuration), "-i", tFile, // 0: template video
-        "-i", vFile,                                                         // 1: cropped video
-        "-filter_complex", filter,
-        "-r","30",
-        "-c:v","libx264","-preset","veryfast","-crf","18",
-        "-movflags","+faststart",
-        "-shortest",
-        "-an",
-        outFile
-      ]);
+  "-y",
+
+  // 0) loop the template PNG forever as a video stream
+  "-loop", "1", "-i", tFile,     // 0:v (background)
+
+  // 1) the cropped video
+  "-i", vFile,                   // 1:v
+
+  // Build scene:
+  // - scale the video to width=1080, clamp height to <= availH (keep AR)
+  // - reset timestamps on BOTH streams so they start at 0
+  // - overlay video at y=top
+  "-filter_complex",
+  `[1:v]scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease,` +
+  `setpts=PTS-STARTPTS[vid];` +
+  `[0:v]format=rgba,setpts=PTS-STARTPTS[bg];` +
+  `[bg][vid]overlay=0:${top}:eval=init:shortest=1,format=yuv420p`,
+
+  // encode
+  "-r", "30",
+  "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+  "-movflags", "+faststart",
+
+  // stop when the video stream ends even though the PNG loops forever
+  "-shortest",
+  "-an",
+
+  outFile
+]);
+
 
       res.setHeader("Content-Type", "video/mp4");
       res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
