@@ -174,7 +174,7 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
   }
 });
 
-// Place a cropped video onto a 1080x1920 PNG template - SIMPLIFIED VERSION
+// Place a cropped video onto a 1080x1920 PNG template - SINGLE PASS VERSION
 app.post("/place-on-template",
   upload.fields([{ name: "template" }, { name: "video" }]),
   async (req, res) => {
@@ -198,22 +198,7 @@ app.post("/place-on-template",
 
       console.log(`Files saved: template=${tFile0}, video=${vFile}`);
 
-      // Step 1: Get video duration first
-      console.log("Getting video duration...");
-      const { stdout: durOut } = await sh("ffprobe", [
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=nk=1:nw=1",
-        vFile
-      ]);
-      const videoDuration = parseFloat(durOut || "0");
-      console.log(`Video duration: ${videoDuration} seconds`);
-      
-      if (videoDuration <= 0) {
-        throw new Error("Could not determine video duration");
-      }
-
-      // Step 2: Normalize template to exact 1080x1920
+      // Normalize template to exact 1080x1920
       console.log("Normalizing template...");
       const tFile = join(tDir, "template_1080x1920.png");
       await sh("ffmpeg", [
@@ -224,7 +209,7 @@ app.post("/place-on-template",
       ]);
       console.log("Template normalized");
 
-      // Step 3: Calculate available space and scale the input video first
+      // Calculate available space
       const availH = 1920 - top - safeBottom;
       console.log(`Available height: ${availH}px`);
       
@@ -232,53 +217,26 @@ app.post("/place-on-template",
         return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
       }
 
-      console.log("Scaling input video...");
-      const scaledVideoFile = join(vDir, "scaled_video.mp4");
-      await sh("ffmpeg", [
-        "-y", "-i", vFile,
-        "-vf", `scale=1080:${availH}:force_original_aspect_ratio=decrease`,
-        "-t", String(videoDuration), // Ensure same duration
-        "-r", "30",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-avoid_negative_ts", "make_zero",
-        scaledVideoFile
-      ]);
-      console.log("Video scaled");
-
-      // Step 4: Create template video with same duration
-      console.log("Creating template video...");
-      const templateVideoFile = join(tDir, "template_video.mp4");
-      await sh("ffmpeg", [
-        "-y",
-        "-loop", "1", 
-        "-i", tFile,
-        "-t", String(videoDuration),
-        "-r", "30",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-avoid_negative_ts", "make_zero",
-        templateVideoFile
-      ]);
-      console.log("Template video created");
-
-      // Step 5: Overlay the scaled video onto the template video
-      console.log("Performing overlay...");
+      // Single-pass approach: do everything in one FFmpeg command
+      console.log("Processing video in single pass...");
       const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
+      
       await sh("ffmpeg", [
         "-y",
-        "-i", templateVideoFile,  // background
-        "-i", scaledVideoFile,    // overlay
-        "-filter_complex", `[0:v][1:v]overlay=0:${top}`,
-        "-t", String(videoDuration),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-loop", "1", "-i", tFile,     // Input 0: template (looped)
+        "-i", vFile,                   // Input 1: video
+        "-filter_complex", 
+        `[1:v]scale=1080:${availH}:force_original_aspect_ratio=decrease[scaled];` +
+        `[0:v][scaled]overlay=0:${top}:shortest=1[out]`,
+        "-map", "[out]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        "-avoid_negative_ts", "make_zero",
-        "-an",  // no audio
+        "-an",
         outFile
       ]);
-      console.log("Overlay complete");
+      
+      console.log("Processing complete");
 
       res.setHeader("Content-Type", "video/mp4");
       res.setHeader("Content-Disposition", 'attachment; filename="branded.mp4"');
