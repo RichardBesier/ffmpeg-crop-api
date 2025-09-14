@@ -255,15 +255,14 @@ const scaleExpr = `scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_
 
    await sh("ffmpeg", [
   "-y",
-  // 0: loop the PNG as a video background at 30 fps
+  // 0: loop the PNG background at 30fps
   "-loop", "1", "-framerate", "30", "-i", tFile,
   // 1: the cropped video
   "-i", vFile,
 
-  // filter: timestamp-fix for bg, scale video to fit width 1080 and <= availH, then overlay at y=top
   "-filter_complex",
   `[0:v]setpts=N/(30*TB),format=rgba[bg];` +
-  `[1:v]scale=1080\\:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease,fps=30[vid];` +
+  `[1:v]scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_ratio=decrease,fps=30[vid];` +
   `[bg][vid]overlay=0:${top}:eval=init,format=yuv420p`,
 
   "-c:v", "libx264",
@@ -271,10 +270,11 @@ const scaleExpr = `scale=1080:min(${availH}\\,ih*1080/iw):force_original_aspect_
   "-crf", "18",
   "-r", "30",
   "-movflags", "+faststart",
-  "-shortest",              // stop when the video (input 1) ends
   "-an",
+  "-shortest",               // <<< important fix
   outFile
 ]);
+
 
 
 
