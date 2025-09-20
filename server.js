@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawn } from "child_process";
 import multer from "multer";
+import { createCanvas, loadImage, registerFont } from 'canvas';
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -366,87 +367,99 @@ app.post("/place-on-template-debug",
   }
 );
 
-// Add text to PNG image with proper formatting
-app.post("/add-text", rawUpload, async (req, res) => {
+// Canvas-based text rendering with proper emoji support
+app.post("/add-text-canvas", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
     
-    // Get text from query parameter
     const text = req.query.text || "";
-    const top = Number(req.query.top || 300); // Default position
+    const top = Number(req.query.top || 300);
     
     if (!text.trim()) {
       return res.status(400).json({ error: "Query param 'text' is required" });
     }
     
-    console.log(`Adding text: "${text}" at top: ${top}px`);
+    console.log(`Canvas: Adding text "${text}" at top: ${top}px`);
     
+    // Save input image
     const { dir, file } = await bufferToTempWithExt(req.body, ".png");
-    console.log(`Image saved to: ${file}`);
     
-    // Output file
-    const outFile = join(tmpdir(), `text-overlay-${Date.now()}.png`);
+    // Load the background image
+    const backgroundImage = await loadImage(file);
+    const canvas = createCanvas(backgroundImage.width, backgroundImage.height);
+    const ctx = canvas.getContext('2d');
     
-    // Manual text wrapping - split text into lines that fit within the width
-    const padding = 80; // Equal padding on both sides
-    const maxWidth = 1080 - (padding * 2); // 920px available width
-    const avgCharWidth = 24; // Account for bold font being wider
-    const maxCharsPerLine = Math.floor(maxWidth / avgCharWidth); // ~38 characters
+    // Draw background image
+    ctx.drawImage(backgroundImage, 0, 0);
     
-    // Split text into words and wrap lines
-    const words = text.split(' ');
-    const lines = [];
-    let currentLine = '';
+    // Configure text styling
+    const fontSize = 44;
+    const padding = 80;
+    const maxWidth = canvas.width - (padding * 2);
+    const lineHeight = 56;
     
-    for (const word of words) {
-      const testLine = currentLine ? `${currentLine} ${word}` : word;
-      if (testLine.length <= maxCharsPerLine) {
-        currentLine = testLine;
-      } else {
-        if (currentLine) {
-          lines.push(currentLine);
-          currentLine = word;
+    // Register fonts (try to use system fonts)
+    try {
+      registerFont('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', { family: 'DejaVu Sans', weight: 'bold' });
+    } catch (e) {
+      console.log("Font registration failed, using default");
+    }
+    
+    // Set font properties
+    ctx.font = `bold ${fontSize}px "DejaVu Sans", "Noto Color Emoji", sans-serif`;
+    ctx.fillStyle = 'white';
+    ctx.textBaseline = 'top';
+    
+    // Word wrapping function
+    function wrapText(text, maxWidth) {
+      const words = text.split(' ');
+      const lines = [];
+      let currentLine = '';
+      
+      for (const word of words) {
+        const testLine = currentLine ? `${currentLine} ${word}` : word;
+        const metrics = ctx.measureText(testLine);
+        
+        if (metrics.width <= maxWidth) {
+          currentLine = testLine;
         } else {
-          // Handle very long words by breaking them
-          lines.push(word);
+          if (currentLine) {
+            lines.push(currentLine);
+            currentLine = word;
+          } else {
+            lines.push(word);
+          }
         }
       }
-    }
-    if (currentLine) {
-      lines.push(currentLine);
+      if (currentLine) {
+        lines.push(currentLine);
+      }
+      return lines;
     }
     
-    console.log(`Lines: ${JSON.stringify(lines)}`);
+    // Wrap text and draw each line
+    const lines = wrapText(text, maxWidth);
+    console.log(`Canvas: Wrapped into ${lines.length} lines`);
     
-    // Force use of bold font (skip emoji fonts for now to ensure bold works)
-    const lineHeight = 56; // Font size + line spacing
-    const textFilters = lines.map((line, index) => {
-      const escapedLine = line.replace(/'/g, "\\'").replace(/:/g, "\\:");
-      const yPos = top + (index * lineHeight);
-      return `drawtext=text='${escapedLine}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${yPos}`;
+    lines.forEach((line, index) => {
+      const y = top + (index * lineHeight);
+      ctx.fillText(line, padding, y);
     });
     
-    const combinedFilter = textFilters.join(',');
+    // Convert canvas to buffer
+    const buffer = canvas.toBuffer('image/png');
     
-    await sh("ffmpeg", [
-      "-y", "-i", file,
-      "-vf", combinedFilter,
-      "-frames:v", "1",
-      outFile
-    ]);
+    // Clean up
+    await fs.rm(dir, { recursive: true, force: true });
     
-    console.log("Text overlay complete with bold font");
+    console.log("Canvas text rendering complete");
     
     res.setHeader("Content-Type", "image/png");
-    res.setHeader("Content-Disposition", 'attachment; filename="text-overlay.png"');
-    res.sendFile(outFile, async (err) => {
-      if (err) console.error("Send file error:", err);
-      await fs.rm(dir, { recursive: true, force: true });
-      console.log("Cleanup complete");
-    });
+    res.setHeader("Content-Disposition", 'attachment; filename="canvas-text-overlay.png"');
+    res.send(buffer);
     
   } catch (e) {
-    console.error("Error in add-text:", e);
+    console.error("Error in canvas text rendering:", e);
     res.status(500).json({ error: String(e.message || e) });
   }
 });
