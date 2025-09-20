@@ -161,7 +161,7 @@ app.post("/frame", rawUpload, async (req, res) => {
   }
 });
 
-// Crop a tiny strip from top (percent)
+// Crop a tiny strip from top (percent) - OPTIMIZED VERSION
 app.post("/crop-strip-top", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No file" });
@@ -171,8 +171,11 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
     const vf = `crop=in_w:in_h*${(100 - percent) / 100}:0:in_h*${percent / 100}`;
     await sh("ffmpeg", [
       "-y", "-i", file, "-vf", vf,
-      "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
-      "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", outFile
+      "-c:v", "libx264", "-crf", "18", "-preset", "ultrafast", // Changed to ultrafast
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      "-avoid_negative_ts", "make_zero", // Added timestamp fix
+      "-threads", "4", // Added thread limit
+      "-an", outFile
     ]);
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Content-Disposition", 'attachment; filename="cropped.mp4"');
