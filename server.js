@@ -366,5 +366,56 @@ app.post("/place-on-template-debug",
   }
 );
 
+// Add text to PNG image
+app.post("/add-text", rawUpload, async (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
+    
+    // Get text from query parameter
+    const text = req.query.text || "";
+    const top = Number(req.query.top || 300); // Default position
+    
+    if (!text.trim()) {
+      return res.status(400).json({ error: "Query param 'text' is required" });
+    }
+    
+    console.log(`Adding text: "${text}" at top: ${top}px`);
+    
+    const { dir, file } = await bufferToTempWithExt(req.body, ".png");
+    console.log(`Image saved to: ${file}`);
+    
+    // Output file
+    const outFile = join(tmpdir(), `text-overlay-${Date.now()}.png`);
+    
+    // Escape text for FFmpeg (handle quotes and special characters)
+    const escapedText = text.replace(/'/g, "\\'").replace(/:/g, "\\:");
+    
+    // Create text overlay filter
+    // Position text in the center horizontally, at specified top position
+    const textFilter = `drawtext=text='${escapedText}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:fontsize=48:fontcolor=white:x=(w-text_w)/2:y=${top}:enable='between(t,0,20)'`;
+    
+    await sh("ffmpeg", [
+      "-y", "-i", file,
+      "-vf", textFilter,
+      "-frames:v", "1",
+      outFile
+    ]);
+    
+    console.log("Text overlay complete");
+    
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Disposition", 'attachment; filename="text-overlay.png"');
+    res.sendFile(outFile, async (err) => {
+      if (err) console.error("Send file error:", err);
+      await fs.rm(dir, { recursive: true, force: true });
+      console.log("Cleanup complete");
+    });
+    
+  } catch (e) {
+    console.error("Error in add-text:", e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
