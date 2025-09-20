@@ -60,6 +60,7 @@ async function encodeWithCrop(inFile, cropText, outFile) {
     "-vf", vf,
     "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
     "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+    "-avoid_negative_ts", "make_zero",
     "-an",
     outFile
   ]);
@@ -73,7 +74,9 @@ async function detectDarkCrop(file, seconds = 4) {
   try {
     const { stderr } = await sh("ffmpeg", [
       "-y", "-ss", "0", "-t", String(seconds),
-      "-i", file, "-vf", vf, "-f", "null", "-"
+      "-i", file, "-vf", vf, "-f", "null", 
+      "-avoid_negative_ts", "make_zero",
+      "-"
     ]);
     return parseCrop(stderr);
   } catch { return null; }
@@ -90,7 +93,9 @@ async function detectWhiteCrop(file, seconds = 6) {
     try {
       const { stderr } = await sh("ffmpeg", [
         "-y", "-ss", "0", "-t", String(seconds),
-        "-i", file, "-vf", vf, "-f", "null", "-"
+        "-i", file, "-vf", vf, "-f", "null",
+        "-avoid_negative_ts", "make_zero",
+        "-"
       ]);
       const c = parseCrop(stderr);
       if (c) return c;
