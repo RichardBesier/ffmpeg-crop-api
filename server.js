@@ -366,7 +366,7 @@ app.post("/place-on-template-debug",
   }
 );
 
-// Add text to PNG image with proper text wrapping
+// Add text to PNG image with proper emoji support
 app.post("/add-text", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
@@ -388,10 +388,10 @@ app.post("/add-text", rawUpload, async (req, res) => {
     const outFile = join(tmpdir(), `text-overlay-${Date.now()}.png`);
     
     // Manual text wrapping - split text into lines that fit within the width
-    const padding = 60;
-    const maxWidth = 1080 - (padding * 2); // 960px available width
-    const avgCharWidth = 22; // More conservative estimate for character width
-    const maxCharsPerLine = Math.floor(maxWidth / avgCharWidth); // ~43 characters
+    const padding = 80; // Equal padding on both sides
+    const maxWidth = 1080 - (padding * 2); // 920px available width
+    const avgCharWidth = 24; // Account for bold font being wider
+    const maxCharsPerLine = Math.floor(maxWidth / avgCharWidth); // ~38 characters
     
     // Split text into words and wrap lines
     const words = text.split(' ');
@@ -418,25 +418,44 @@ app.post("/add-text", rawUpload, async (req, res) => {
     
     console.log(`Lines: ${JSON.stringify(lines)}`);
     
-    // Create multiple drawtext filters - one for each line
-    const lineHeight = 54; // Font size + line spacing
+    // Create multiple drawtext filters - one for each line with emoji support
+    const lineHeight = 56; // Font size + line spacing
     const textFilters = lines.map((line, index) => {
+      const escapedLine = line.replace(/'/g, "\\'").replace(/:/g, "\\:");
+      const yPos = top + (index * lineHeight);
+      
+      // Try emoji font first, with fallback to regular bold font
+      return `drawtext=text='${escapedLine}':fontfile=/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${yPos}:enable='between(t,0,20)'`;
+    });
+    
+    // If emoji font fails, fallback to regular font
+    const fallbackFilters = lines.map((line, index) => {
       const escapedLine = line.replace(/'/g, "\\'").replace(/:/g, "\\:");
       const yPos = top + (index * lineHeight);
       return `drawtext=text='${escapedLine}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${yPos}`;
     });
     
-    // Combine all text filters
-    const combinedFilter = textFilters.join(',');
-    
-    await sh("ffmpeg", [
-      "-y", "-i", file,
-      "-vf", combinedFilter,
-      "-frames:v", "1",
-      outFile
-    ]);
-    
-    console.log("Text overlay complete");
+    // Try with emoji font first
+    try {
+      const emojiFilter = textFilters.join(',');
+      await sh("ffmpeg", [
+        "-y", "-i", file,
+        "-vf", emojiFilter,
+        "-frames:v", "1",
+        outFile
+      ]);
+      console.log("Text overlay with emoji font complete");
+    } catch (emojiError) {
+      console.log("Emoji font failed, using fallback font");
+      const fallbackFilter = fallbackFilters.join(',');
+      await sh("ffmpeg", [
+        "-y", "-i", file,
+        "-vf", fallbackFilter,
+        "-frames:v", "1",
+        outFile
+      ]);
+      console.log("Text overlay with fallback font complete");
+    }
     
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Content-Disposition", 'attachment; filename="text-overlay.png"');
