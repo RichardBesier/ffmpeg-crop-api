@@ -366,7 +366,7 @@ app.post("/place-on-template-debug",
   }
 );
 
-// Add text to PNG image with improved formatting
+// Add text to PNG image with text wrapping
 app.post("/add-text", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
@@ -387,14 +387,44 @@ app.post("/add-text", rawUpload, async (req, res) => {
     // Output file
     const outFile = join(tmpdir(), `text-overlay-${Date.now()}.png`);
     
+    // Manual text wrapping - split text into lines that fit within the width
+    const padding = 60;
+    const maxWidth = 1080 - (padding * 2); // 960px available width
+    const avgCharWidth = 24; // Approximate character width at 44px font size
+    const maxCharsPerLine = Math.floor(maxWidth / avgCharWidth); // ~40 characters
+    
+    // Split text into words and wrap lines
+    const words = text.split(' ');
+    const lines = [];
+    let currentLine = '';
+    
+    for (const word of words) {
+      const testLine = currentLine ? `${currentLine} ${word}` : word;
+      if (testLine.length <= maxCharsPerLine) {
+        currentLine = testLine;
+      } else {
+        if (currentLine) {
+          lines.push(currentLine);
+          currentLine = word;
+        } else {
+          // Handle very long words
+          lines.push(word);
+        }
+      }
+    }
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+    
+    // Join lines with literal newlines for FFmpeg
+    const wrappedText = lines.join('\\n');
+    console.log(`Wrapped text: ${wrappedText}`);
+    
     // Escape text for FFmpeg (handle quotes and special characters)
-    const escapedText = text.replace(/'/g, "\\'").replace(/:/g, "\\:");
+    const escapedText = wrappedText.replace(/'/g, "\\'").replace(/:/g, "\\:");
     
     // Create text overlay filter with padding and bold font
-    const padding = 60;
-    
-    // Simple approach - just position with padding, let text wrap naturally
-    const textFilter = `drawtext=text='${escapedText}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${top}:line_spacing=8`;
+    const textFilter = `drawtext=text='${escapedText}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${top}:line_spacing=12`;
     
     await sh("ffmpeg", [
       "-y", "-i", file,
