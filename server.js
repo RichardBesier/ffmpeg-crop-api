@@ -366,7 +366,7 @@ app.post("/place-on-template-debug",
   }
 );
 
-// Add text to PNG image
+// Add text to PNG image with improved formatting
 app.post("/add-text", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
@@ -391,10 +391,10 @@ app.post("/add-text", rawUpload, async (req, res) => {
     const escapedText = text.replace(/'/g, "\\'").replace(/:/g, "\\:");
     
     // Create text overlay filter with padding and bold font
-    // Add 60px padding on left and right, use bold font
     const padding = 60;
-    const maxWidth = `w-${padding * 2}`; // Available width minus padding
-    const textFilter = `drawtext=text='${escapedText}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=48:fontcolor=white:x=${padding}:y=${top}:text_w=${maxWidth}:fontcolor_expr=white`;
+    
+    // Simple approach - just position with padding, let text wrap naturally
+    const textFilter = `drawtext=text='${escapedText}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${top}:line_spacing=8`;
     
     await sh("ffmpeg", [
       "-y", "-i", file,
