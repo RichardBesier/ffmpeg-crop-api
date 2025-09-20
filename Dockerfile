@@ -1,18 +1,13 @@
-FROM node:20-bullseye
+FROM node:20-bookworm-slim
 
-# Add backports repository for newer FFmpeg
-RUN echo "deb http://deb.debian.org/debian bullseye-backports main" >> /etc/apt/sources.list
-
-# Install newer FFmpeg from backports with all features
+# Install newer FFmpeg and fonts
 RUN apt-get update && apt-get install -y \
+    ffmpeg \
     fonts-dejavu \
     fonts-noto-color-emoji \
     fontconfig \
-    && apt-get install -y -t bullseye-backports ffmpeg \
+    && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
-
-# Update font cache for emoji support
-RUN fc-cache -fv
 
 WORKDIR /app
 
