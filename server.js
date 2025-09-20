@@ -366,7 +366,7 @@ app.post("/place-on-template-debug",
   }
 );
 
-// Add text to PNG image with text wrapping
+// Add text to PNG image with proper text wrapping
 app.post("/add-text", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
@@ -390,8 +390,8 @@ app.post("/add-text", rawUpload, async (req, res) => {
     // Manual text wrapping - split text into lines that fit within the width
     const padding = 60;
     const maxWidth = 1080 - (padding * 2); // 960px available width
-    const avgCharWidth = 24; // Approximate character width at 44px font size
-    const maxCharsPerLine = Math.floor(maxWidth / avgCharWidth); // ~40 characters
+    const avgCharWidth = 22; // More conservative estimate for character width
+    const maxCharsPerLine = Math.floor(maxWidth / avgCharWidth); // ~43 characters
     
     // Split text into words and wrap lines
     const words = text.split(' ');
@@ -407,7 +407,7 @@ app.post("/add-text", rawUpload, async (req, res) => {
           lines.push(currentLine);
           currentLine = word;
         } else {
-          // Handle very long words
+          // Handle very long words by breaking them
           lines.push(word);
         }
       }
@@ -416,19 +416,22 @@ app.post("/add-text", rawUpload, async (req, res) => {
       lines.push(currentLine);
     }
     
-    // Join lines with literal newlines for FFmpeg
-    const wrappedText = lines.join('\\n');
-    console.log(`Wrapped text: ${wrappedText}`);
+    console.log(`Lines: ${JSON.stringify(lines)}`);
     
-    // Escape text for FFmpeg (handle quotes and special characters)
-    const escapedText = wrappedText.replace(/'/g, "\\'").replace(/:/g, "\\:");
+    // Create multiple drawtext filters - one for each line
+    const lineHeight = 54; // Font size + line spacing
+    const textFilters = lines.map((line, index) => {
+      const escapedLine = line.replace(/'/g, "\\'").replace(/:/g, "\\:");
+      const yPos = top + (index * lineHeight);
+      return `drawtext=text='${escapedLine}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${yPos}`;
+    });
     
-    // Create text overlay filter with padding and bold font
-    const textFilter = `drawtext=text='${escapedText}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${top}:line_spacing=12`;
+    // Combine all text filters
+    const combinedFilter = textFilters.join(',');
     
     await sh("ffmpeg", [
       "-y", "-i", file,
-      "-vf", textFilter,
+      "-vf", combinedFilter,
       "-frames:v", "1",
       outFile
     ]);
