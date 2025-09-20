@@ -418,43 +418,47 @@ app.post("/add-text", rawUpload, async (req, res) => {
     
     console.log(`Lines: ${JSON.stringify(lines)}`);
     
-    // Create multiple drawtext filters - one for each line with emoji support
+    // Create multiple drawtext filters - one for each line with improved emoji support
     const lineHeight = 56; // Font size + line spacing
-    const textFilters = lines.map((line, index) => {
-      const escapedLine = line.replace(/'/g, "\\'").replace(/:/g, "\\:");
-      const yPos = top + (index * lineHeight);
-      
-      // Try emoji font first, with fallback to regular bold font
-      return `drawtext=text='${escapedLine}':fontfile=/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${yPos}:enable='between(t,0,20)'`;
-    });
     
-    // If emoji font fails, fallback to regular font
-    const fallbackFilters = lines.map((line, index) => {
-      const escapedLine = line.replace(/'/g, "\\'").replace(/:/g, "\\:");
-      const yPos = top + (index * lineHeight);
-      return `drawtext=text='${escapedLine}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=44:fontcolor=white:x=${padding}:y=${yPos}`;
-    });
+    // Try different font configurations for emoji support
+    const fontPaths = [
+      '/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf',
+      '/usr/share/fonts/truetype/noto-color-emoji/NotoColorEmoji.ttf',
+      '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+    ];
     
-    // Try with emoji font first
-    try {
-      const emojiFilter = textFilters.join(',');
-      await sh("ffmpeg", [
-        "-y", "-i", file,
-        "-vf", emojiFilter,
-        "-frames:v", "1",
-        outFile
-      ]);
-      console.log("Text overlay with emoji font complete");
-    } catch (emojiError) {
-      console.log("Emoji font failed, using fallback font");
-      const fallbackFilter = fallbackFilters.join(',');
-      await sh("ffmpeg", [
-        "-y", "-i", file,
-        "-vf", fallbackFilter,
-        "-frames:v", "1",
-        outFile
-      ]);
-      console.log("Text overlay with fallback font complete");
+    let success = false;
+    
+    for (const fontPath of fontPaths) {
+      try {
+        const textFilters = lines.map((line, index) => {
+          const escapedLine = line.replace(/'/g, "\\'").replace(/:/g, "\\:");
+          const yPos = top + (index * lineHeight);
+          return `drawtext=text='${escapedLine}':fontfile=${fontPath}:fontsize=44:fontcolor=white:x=${padding}:y=${yPos}`;
+        });
+        
+        const combinedFilter = textFilters.join(',');
+        
+        await sh("ffmpeg", [
+          "-y", "-i", file,
+          "-vf", combinedFilter,
+          "-frames:v", "1",
+          outFile
+        ]);
+        
+        console.log(`Text overlay complete using font: ${fontPath}`);
+        success = true;
+        break;
+        
+      } catch (fontError) {
+        console.log(`Font ${fontPath} failed: ${fontError.message}`);
+        continue;
+      }
+    }
+    
+    if (!success) {
+      throw new Error("All font options failed");
     }
     
     res.setHeader("Content-Type", "image/png");
