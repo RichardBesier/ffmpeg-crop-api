@@ -367,7 +367,7 @@ app.post("/place-on-template-debug",
   }
 );
 
-// Canvas-based text rendering with proper emoji support
+// Canvas-based text rendering with emoji image replacement
 app.post("/add-text-canvas", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
@@ -398,7 +398,7 @@ app.post("/add-text-canvas", rawUpload, async (req, res) => {
     const maxWidth = canvas.width - (padding * 2);
     const lineHeight = 56;
     
-    // Register fonts (try to use system fonts)
+    // Register fonts
     try {
       registerFont('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', { family: 'DejaVu Sans', weight: 'bold' });
     } catch (e) {
@@ -406,9 +406,22 @@ app.post("/add-text-canvas", rawUpload, async (req, res) => {
     }
     
     // Set font properties
-    ctx.font = `bold ${fontSize}px "DejaVu Sans", "Noto Color Emoji", sans-serif`;
+    ctx.font = `bold ${fontSize}px "DejaVu Sans", sans-serif`;
     ctx.fillStyle = 'white';
     ctx.textBaseline = 'top';
+    
+    // Simple emoji to text replacement for better readability
+    const processedText = text
+      .replace(/😭/g, '😢')  // Use simpler sad face
+      .replace(/🤣/g, '😂')  // Use simpler laugh
+      .replace(/😂/g, ':D')  // Laughing to text emoticon
+      .replace(/😢/g, ':(')  // Sad to text emoticon
+      .replace(/❤️/g, '<3') // Heart to text
+      .replace(/🔥/g, '*')   // Fire to asterisk
+      .replace(/💯/g, '100') // 100 emoji to text
+      .replace(/👍/g, '+1')  // Thumbs up
+      .replace(/👎/g, '-1')  // Thumbs down
+      .replace(/🙏/g, '+');  // Prayer hands to plus
     
     // Word wrapping function
     function wrapText(text, maxWidth) {
@@ -438,7 +451,7 @@ app.post("/add-text-canvas", rawUpload, async (req, res) => {
     }
     
     // Wrap text and draw each line
-    const lines = wrapText(text, maxWidth);
+    const lines = wrapText(processedText, maxWidth);
     console.log(`Canvas: Wrapped into ${lines.length} lines`);
     
     lines.forEach((line, index) => {
