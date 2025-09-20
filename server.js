@@ -367,7 +367,7 @@ app.post("/place-on-template-debug",
   }
 );
 
-// Canvas-based text rendering with emoji image replacement
+// Canvas-based text rendering with actual colored emoji images
 app.post("/add-text-canvas", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
@@ -394,6 +394,7 @@ app.post("/add-text-canvas", rawUpload, async (req, res) => {
     
     // Configure text styling
     const fontSize = 44;
+    const emojiSize = 48; // Slightly larger than text for visibility
     const padding = 80;
     const maxWidth = canvas.width - (padding * 2);
     const lineHeight = 56;
@@ -410,30 +411,74 @@ app.post("/add-text-canvas", rawUpload, async (req, res) => {
     ctx.fillStyle = 'white';
     ctx.textBaseline = 'top';
     
-    // Simple emoji to text replacement for better readability
-    const processedText = text
-      .replace(/😭/g, '😢')  // Use simpler sad face
-      .replace(/🤣/g, '😂')  // Use simpler laugh
-      .replace(/😂/g, ':D')  // Laughing to text emoticon
-      .replace(/😢/g, ':(')  // Sad to text emoticon
-      .replace(/❤️/g, '<3') // Heart to text
-      .replace(/🔥/g, '*')   // Fire to asterisk
-      .replace(/💯/g, '100') // 100 emoji to text
-      .replace(/👍/g, '+1')  // Thumbs up
-      .replace(/👎/g, '-1')  // Thumbs down
-      .replace(/🙏/g, '+');  // Prayer hands to plus
+    // Function to get Twemoji URL for emoji
+    function getEmojiUrl(emoji) {
+      const codePoint = emoji.codePointAt(0).toString(16);
+      return `https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/${codePoint}.png`;
+    }
     
-    // Word wrapping function
-    function wrapText(text, maxWidth) {
+    // Function to detect emojis in text
+    function parseTextWithEmojis(text) {
+      const emojiRegex = /(\p{Emoji_Presentation}|\p{Emoji}\uFE0F)/gu;
+      const parts = [];
+      let lastIndex = 0;
+      let match;
+      
+      while ((match = emojiRegex.exec(text)) !== null) {
+        // Add text before emoji
+        if (match.index > lastIndex) {
+          parts.push({
+            type: 'text',
+            content: text.slice(lastIndex, match.index)
+          });
+        }
+        
+        // Add emoji
+        parts.push({
+          type: 'emoji',
+          content: match[0],
+          url: getEmojiUrl(match[0])
+        });
+        
+        lastIndex = emojiRegex.lastIndex;
+      }
+      
+      // Add remaining text
+      if (lastIndex < text.length) {
+        parts.push({
+          type: 'text',
+          content: text.slice(lastIndex)
+        });
+      }
+      
+      return parts;
+    }
+    
+    // Function to measure text width including emojis
+    function measureTextWithEmojis(parts) {
+      let width = 0;
+      for (const part of parts) {
+        if (part.type === 'text') {
+          width += ctx.measureText(part.content).width;
+        } else if (part.type === 'emoji') {
+          width += emojiSize; // Approximate emoji width
+        }
+      }
+      return width;
+    }
+    
+    // Word wrapping with emoji support
+    function wrapTextWithEmojis(text, maxWidth) {
       const words = text.split(' ');
       const lines = [];
       let currentLine = '';
       
       for (const word of words) {
         const testLine = currentLine ? `${currentLine} ${word}` : word;
-        const metrics = ctx.measureText(testLine);
+        const parts = parseTextWithEmojis(testLine);
+        const width = measureTextWithEmojis(parts);
         
-        if (metrics.width <= maxWidth) {
+        if (width <= maxWidth) {
           currentLine = testLine;
         } else {
           if (currentLine) {
@@ -450,14 +495,39 @@ app.post("/add-text-canvas", rawUpload, async (req, res) => {
       return lines;
     }
     
-    // Wrap text and draw each line
-    const lines = wrapText(processedText, maxWidth);
+    // Function to render a line with emojis
+    async function renderLineWithEmojis(line, x, y) {
+      const parts = parseTextWithEmojis(line);
+      let currentX = x;
+      
+      for (const part of parts) {
+        if (part.type === 'text') {
+          ctx.fillText(part.content, currentX, y);
+          currentX += ctx.measureText(part.content).width;
+        } else if (part.type === 'emoji') {
+          try {
+            // Download and draw emoji image
+            const emojiImage = await loadImage(part.url);
+            ctx.drawImage(emojiImage, currentX, y - 4, emojiSize, emojiSize);
+            currentX += emojiSize;
+          } catch (emojiError) {
+            console.log(`Failed to load emoji ${part.content}, using fallback`);
+            // Fallback: draw the emoji character
+            ctx.fillText(part.content, currentX, y);
+            currentX += ctx.measureText(part.content).width;
+          }
+        }
+      }
+    }
+    
+    // Wrap text and render each line
+    const lines = wrapTextWithEmojis(text, maxWidth);
     console.log(`Canvas: Wrapped into ${lines.length} lines`);
     
-    lines.forEach((line, index) => {
-      const y = top + (index * lineHeight);
-      ctx.fillText(line, padding, y);
-    });
+    for (let i = 0; i < lines.length; i++) {
+      const y = top + (i * lineHeight);
+      await renderLineWithEmojis(lines[i], padding, y);
+    }
     
     // Convert canvas to buffer
     const buffer = canvas.toBuffer('image/png');
@@ -465,7 +535,7 @@ app.post("/add-text-canvas", rawUpload, async (req, res) => {
     // Clean up
     await fs.rm(dir, { recursive: true, force: true });
     
-    console.log("Canvas text rendering complete");
+    console.log("Canvas text rendering with colored emojis complete");
     
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Content-Disposition", 'attachment; filename="canvas-text-overlay.png"');
