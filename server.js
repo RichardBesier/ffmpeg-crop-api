@@ -390,9 +390,11 @@ app.post("/add-text", rawUpload, async (req, res) => {
     // Escape text for FFmpeg (handle quotes and special characters)
     const escapedText = text.replace(/'/g, "\\'").replace(/:/g, "\\:");
     
-    // Create text overlay filter
-    // Position text in the center horizontally, at specified top position
-    const textFilter = `drawtext=text='${escapedText}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:fontsize=48:fontcolor=white:x=(w-text_w)/2:y=${top}:enable='between(t,0,20)'`;
+    // Create text overlay filter with padding and bold font
+    // Add 60px padding on left and right, use bold font
+    const padding = 60;
+    const maxWidth = `w-${padding * 2}`; // Available width minus padding
+    const textFilter = `drawtext=text='${escapedText}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=48:fontcolor=white:x=${padding}:y=${top}:text_w=${maxWidth}:fontcolor_expr=white`;
     
     await sh("ffmpeg", [
       "-y", "-i", file,
