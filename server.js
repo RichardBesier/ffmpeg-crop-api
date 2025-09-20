@@ -58,9 +58,10 @@ async function encodeWithCrop(inFile, cropText, outFile) {
   await sh("ffmpeg", [
     "-y", "-i", inFile,
     "-vf", vf,
-    "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
+    "-c:v", "libx264", "-crf", "18", "-preset", "ultrafast", // Changed to ultrafast
     "-pix_fmt", "yuv420p", "-movflags", "+faststart",
     "-avoid_negative_ts", "make_zero",
+    "-threads", "4", // Limit threads
     "-an",
     outFile
   ]);
@@ -69,32 +70,33 @@ async function encodeWithCrop(inFile, cropText, outFile) {
 // ------------------------------
 // DETECTORS
 // ------------------------------
-async function detectDarkCrop(file, seconds = 4) {
+async function detectDarkCrop(file, seconds = 2) { // Reduced from 4 to 2 seconds
   const vf = "format=gray,boxblur=16:1:cr=0:ar=0,cropdetect=limit=24:round=2:reset=0";
   try {
     const { stderr } = await sh("ffmpeg", [
-      "-y", "-ss", "0", "-t", String(seconds),
+      "-y", "-ss", "2", "-t", String(seconds), // Start at 2 seconds to skip intro
       "-i", file, "-vf", vf, "-f", "null", 
       "-avoid_negative_ts", "make_zero",
+      "-threads", "4", // Limit threads to prevent overload
       "-"
     ]);
     return parseCrop(stderr);
   } catch { return null; }
 }
 
-async function detectWhiteCrop(file, seconds = 6) {
+async function detectWhiteCrop(file, seconds = 3) { // Reduced from 6 to 3 seconds
   const pipelines = [
     "format=gray,boxblur=28:1:cr=0:ar=0,lut=y='val>238?0:255',cropdetect=limit=6:round=2:reset=0",
-    "format=gray,boxblur=34:1:cr=0:ar=0,lut=y='val>240?0:255',cropdetect=limit=8:round=2:reset=0",
-    "format=gray,boxblur=40:1:cr=0:ar=0,lut=y='val>242?0:255',cropdetect=limit=10:round=2:reset=0",
-    "format=gray,negate,boxblur=22:1:cr=0:ar=0,cropdetect=limit=24:round=2:reset=0"
+    "format=gray,boxblur=34:1:cr=0:ar=0,lut=y='val>240?0:255',cropdetect=limit=8:round=2:reset=0"
+    // Removed the slower pipelines to speed up processing
   ];
   for (const vf of pipelines) {
     try {
       const { stderr } = await sh("ffmpeg", [
-        "-y", "-ss", "0", "-t", String(seconds),
+        "-y", "-ss", "2", "-t", String(seconds), // Start at 2 seconds
         "-i", file, "-vf", vf, "-f", "null",
         "-avoid_negative_ts", "make_zero",
+        "-threads", "4", // Limit threads
         "-"
       ]);
       const c = parseCrop(stderr);
