@@ -665,5 +665,26 @@ app.post("/manipulate-video", rawUpload, async (req, res) => {
   }
 });
 
+// Video pass-through endpoint - returns video as-is
+app.post("/video-passthrough", rawUpload, async (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ error: "No video file in body" });
+    
+    console.log(`Processing video pass-through, size: ${req.body.length} bytes`);
+    
+    // Simply return the video data as-is
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", 'inline; filename="video.mp4"');
+    res.setHeader("Content-Length", req.body.length);
+    res.send(req.body);
+    
+    console.log("Video pass-through complete");
+    
+  } catch (e) {
+    console.error("Error in video pass-through:", e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
