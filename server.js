@@ -665,23 +665,59 @@ app.post("/manipulate-video", rawUpload, async (req, res) => {
   }
 });
 
-// Video pass-through endpoint - returns video as-is
-app.post("/video-passthrough", rawUpload, async (req, res) => {
+// Store video and return clean URL
+app.post("/store-video", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No video file in body" });
     
-    console.log(`Processing video pass-through, size: ${req.body.length} bytes`);
+    console.log(`Storing video, size: ${req.body.length} bytes`);
     
-    // Simply return the video data as-is
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", 'inline; filename="video.mp4"');
-    res.setHeader("Content-Length", req.body.length);
-    res.send(req.body);
+    // Generate unique filename
+    const videoId = `video_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const videoPath = join(tmpdir(), `${videoId}.mp4`);
     
-    console.log("Video pass-through complete");
+    // Store the video file
+    await fs.writeFile(videoPath, req.body);
+    
+    // Return clean URL
+    const videoUrl = `https://ffmpeg-crop-api-production.up.railway.app/get-video/${videoId}`;
+    
+    console.log(`Video stored with ID: ${videoId}`);
+    
+    res.json({
+      success: true,
+      videoUrl: videoUrl,
+      videoId: videoId,
+      fileSize: req.body.length
+    });
     
   } catch (e) {
-    console.error("Error in video pass-through:", e);
+    console.error("Error storing video:", e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// Serve stored videos
+app.get("/get-video/:videoId", async (req, res) => {
+  try {
+    const videoId = req.params.videoId;
+    const videoPath = join(tmpdir(), `${videoId}.mp4`);
+    
+    // Check if video exists
+    try {
+      await fs.access(videoPath);
+    } catch {
+      return res.status(404).json({ error: "Video not found" });
+    }
+    
+    console.log(`Serving video: ${videoId}`);
+    
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", 'inline; filename="video.mp4"');
+    res.sendFile(videoPath);
+    
+  } catch (e) {
+    console.error("Error serving video:", e);
     res.status(500).json({ error: String(e.message || e) });
   }
 });
