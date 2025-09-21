@@ -185,7 +185,7 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
   }
 });
 
-// Place a cropped video onto a 1080x1920 PNG template - WORKING VERSION
+// Place a cropped video onto a 1080x1920 PNG template - OPTIMIZED VERSION
 app.post("/place-on-template",
   upload.fields([{ name: "template" }, { name: "video" }]),
   async (req, res) => {
@@ -240,7 +240,7 @@ app.post("/place-on-template",
         return res.status(400).json({ error: "Invalid top/bottom: no space left for the video." });
       }
 
-      // Create template video background (like the working debug test)
+      // Create template video background with optimizations
       console.log("Creating template background...");
       const templateVideo = join(tDir, "template_bg.mp4");
       await sh("ffmpeg", [
@@ -250,10 +250,12 @@ app.post("/place-on-template",
         "-r", "30",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-pix_fmt", "yuv420p",
+        "-avoid_negative_ts", "make_zero", // Added timestamp fix
+        "-threads", "4", // Added thread limit
         templateVideo
       ]);
 
-      // Final composition using the same approach as the working debug test
+      // Final composition with optimizations
       console.log("Final composition...");
       const outFile = join(tmpdir(), `brand-${Date.now()}.mp4`);
       
@@ -265,6 +267,8 @@ app.post("/place-on-template",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-t", String(videoDuration),
+        "-avoid_negative_ts", "make_zero", // Added timestamp fix
+        "-threads", "4", // Added thread limit
         "-an",
         outFile
       ]);
