@@ -561,5 +561,109 @@ app.post("/add-text-canvas", rawUpload, async (req, res) => {
   }
 });
 
+// Unified video manipulation endpoint
+app.post("/manipulate-video", rawUpload, async (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ error: "No video file in body" });
+    
+    const effect = req.query.effect;
+    const validEffects = ['zoom', 'speed', 'slow', 'mirror', 'crop-top', 'crop-bottom', 'crop-sides', 'bars-horizontal', 'bars-vertical', 'bars-top'];
+    
+    if (!effect || !validEffects.includes(effect)) {
+      return res.status(400).json({ 
+        error: `Invalid effect. Must be one of: ${validEffects.join(', ')}` 
+      });
+    }
+    
+    console.log(`Applying effect: ${effect}`);
+    
+    const { dir, file } = await bufferToTemp(req.body);
+    const outFile = join(tmpdir(), `manipulated-${Date.now()}-${effect}.mp4`);
+    
+    let ffmpegArgs = ["-y", "-i", file];
+    
+    // Apply the specific effect
+    switch (effect) {
+      case 'zoom':
+        // 5% zoom in (scale up and crop center)
+        ffmpegArgs.push(
+          "-vf", "scale=iw*1.05:ih*1.05,crop=iw/1.05:ih/1.05:(iw-iw/1.05)/2:(ih-ih/1.05)/2"
+        );
+        break;
+        
+      case 'speed':
+        // 5% speed up
+        ffmpegArgs.push("-vf", "setpts=PTS/1.05");
+        break;
+        
+      case 'slow':
+        // 5% slow down
+        ffmpegArgs.push("-vf", "setpts=PTS*1.05");
+        break;
+        
+      case 'mirror':
+        // Horizontal flip
+        ffmpegArgs.push("-vf", "hflip");
+        break;
+        
+      case 'crop-top':
+        // Crop 5% from top
+        ffmpegArgs.push("-vf", "crop=iw:ih*0.95:0:ih*0.05");
+        break;
+        
+      case 'crop-bottom':
+        // Crop 5% from bottom
+        ffmpegArgs.push("-vf", "crop=iw:ih*0.95:0:0");
+        break;
+        
+      case 'crop-sides':
+        // Crop 2% from each side (4% total width reduction)
+        ffmpegArgs.push("-vf", "crop=iw*0.96:ih:iw*0.02:0");
+        break;
+        
+      case 'bars-horizontal':
+        // Add thin black bars top and bottom (2% each)
+        ffmpegArgs.push("-vf", "pad=iw:ih*1.04:0:ih*0.02:black");
+        break;
+        
+      case 'bars-vertical':
+        // Add thin black bars left and right (2% each)
+        ffmpegArgs.push("-vf", "pad=iw*1.04:ih:iw*0.02:0:black");
+        break;
+        
+      case 'bars-top':
+        // Add thin black bar top only (2%)
+        ffmpegArgs.push("-vf", "pad=iw:ih*1.02:0:ih*0.02:black");
+        break;
+    }
+    
+    // Add encoding settings with optimizations
+    ffmpegArgs.push(
+      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      "-avoid_negative_ts", "make_zero",
+      "-threads", "4",
+      "-an", // Remove audio
+      outFile
+    );
+    
+    await sh("ffmpeg", ffmpegArgs);
+    
+    console.log(`Effect ${effect} applied successfully`);
+    
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", `attachment; filename="${effect}-manipulated.mp4"`);
+    res.sendFile(outFile, async (err) => {
+      if (err) console.error("Send file error:", err);
+      await fs.rm(dir, { recursive: true, force: true });
+      console.log("Cleanup complete");
+    });
+    
+  } catch (e) {
+    console.error("Error in video manipulation:", e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
