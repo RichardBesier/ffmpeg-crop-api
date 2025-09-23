@@ -722,5 +722,91 @@ app.get("/get-video/:videoId", async (req, res) => {
   }
 });
 
+// Merge Instagram audio with uploaded video
+app.post("/merge-instagram-audio", rawUpload, async (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ error: "No video file in body" });
+    
+    const instagramUrl = req.query.url;
+    if (!instagramUrl) {
+      return res.status(400).json({ error: "Instagram URL required as 'url' query parameter" });
+    }
+    
+    console.log(`Merging Instagram audio from: ${instagramUrl}`);
+    console.log(`Video size: ${req.body.length} bytes`);
+    
+    // Save input video
+    const { dir: videoDir, file: videoFile } = await bufferToTemp(req.body);
+    
+    // Create temp directory for audio download
+    const audioDir = await fs.mkdtemp(join(tmpdir(), "instagram-audio-"));
+    const audioFile = join(audioDir, "audio.%(ext)s");
+    
+    try {
+      // Step 1: Download audio from Instagram reel using yt-dlp
+      console.log("Downloading Instagram audio...");
+      await sh("yt-dlp", [
+        "--extract-audio",
+        "--audio-format", "mp3",
+        "--audio-quality", "0", // Best quality
+        "-o", audioFile,
+        instagramUrl
+      ]);
+      
+      // Find the downloaded audio file (yt-dlp adds extension)
+      const audioFiles = await fs.readdir(audioDir);
+      const downloadedAudio = audioFiles.find(f => f.startsWith('audio.'));
+      
+      if (!downloadedAudio) {
+        throw new Error("Failed to download audio from Instagram URL");
+      }
+      
+      const actualAudioFile = join(audioDir, downloadedAudio);
+      console.log(`Audio downloaded: ${downloadedAudio}`);
+      
+      // Step 2: Merge video with Instagram audio using FFmpeg
+      console.log("Merging video with Instagram audio...");
+      const outFile = join(tmpdir(), `merged-${Date.now()}.mp4`);
+      
+      await sh("ffmpeg", [
+        "-y",
+        "-i", videoFile,        // Input video (silent)
+        "-i", actualAudioFile,  // Input audio from Instagram
+        "-c:v", "copy",         // Copy video stream without re-encoding
+        "-c:a", "aac",          // Encode audio as AAC
+        "-map", "0:v:0",        // Map video from first input
+        "-map", "1:a:0",        // Map audio from second input
+        "-shortest",            // Stop at shortest stream length
+        "-avoid_negative_ts", "make_zero",
+        "-threads", "4",
+        outFile
+      ]);
+      
+      console.log("Audio merge complete");
+      
+      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Content-Disposition", 'attachment; filename="video-with-instagram-audio.mp4"');
+      res.sendFile(outFile, async (err) => {
+        if (err) console.error("Send file error:", err);
+        // Cleanup
+        await fs.rm(videoDir, { recursive: true, force: true });
+        await fs.rm(audioDir, { recursive: true, force: true });
+        console.log("Cleanup complete");
+      });
+      
+    } catch (downloadError) {
+      console.error("Download/merge error:", downloadError);
+      // Cleanup on error
+      await fs.rm(videoDir, { recursive: true, force: true });
+      await fs.rm(audioDir, { recursive: true, force: true });
+      throw downloadError;
+    }
+    
+  } catch (e) {
+    console.error("Error in Instagram audio merge:", e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
