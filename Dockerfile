@@ -1,6 +1,6 @@
 FROM node:20-bookworm-slim
 
-# Install FFmpeg, fonts, and canvas dependencies
+# Install FFmpeg, fonts, canvas dependencies, and yt-dlp
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     fonts-dejavu \
@@ -12,7 +12,10 @@ RUN apt-get update && apt-get install -y \
     libjpeg-dev \
     libgif-dev \
     librsvg2-dev \
+    python3 \
+    python3-pip \
     && fc-cache -fv \
+    && pip3 install --break-system-packages yt-dlp \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
