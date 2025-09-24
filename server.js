@@ -808,5 +808,57 @@ app.post("/merge-instagram-audio", rawUpload, async (req, res) => {
   }
 });
 
+// Expand image to 1920x1080 with blurred background
+app.post("/expand-image", rawUpload, async (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
+    
+    console.log(`Expanding image to 1920x1080, input size: ${req.body.length} bytes`);
+    
+    // Save input image
+    const { dir, file } = await bufferToTempWithExt(req.body, ".jpg");
+    const outFile = join(tmpdir(), `expanded-${Date.now()}.jpg`);
+    
+    // Create the expanded image with FFmpeg
+    await sh("ffmpeg", [
+      "-y",
+      "-i", file,  // Input image
+      "-i", file,  // Same image again for background
+      
+      // Filter complex to create blurred background + centered original
+      "-filter_complex", [
+        // Background: scale to fill 1920x1080, then blur heavily
+        "[1:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,gblur=sigma=20[bg]",
+        
+        // Foreground: scale to fit within 1920x1080 while preserving aspect ratio
+        "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease[fg]",
+        
+        // Overlay foreground on blurred background, centered
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+      ].join(";"),
+      
+      // Output settings
+      "-q:v", "2",  // High quality JPEG
+      "-avoid_negative_ts", "make_zero",
+      "-threads", "4",
+      outFile
+    ]);
+    
+    console.log("Image expansion complete");
+    
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Content-Disposition", 'attachment; filename="expanded-1920x1080.jpg"');
+    res.sendFile(outFile, async (err) => {
+      if (err) console.error("Send file error:", err);
+      await fs.rm(dir, { recursive: true, force: true });
+      console.log("Cleanup complete");
+    });
+    
+  } catch (e) {
+    console.error("Error expanding image:", e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
