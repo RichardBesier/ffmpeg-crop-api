@@ -860,5 +860,46 @@ app.post("/expand-image", rawUpload, async (req, res) => {
   }
 });
 
+// Extract audio from MP4 video as MP3
+app.post("/extract-audio", rawUpload, async (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ error: "No video file in body" });
+    
+    console.log(`Extracting audio from video, input size: ${req.body.length} bytes`);
+    
+    // Save input video
+    const { dir, file } = await bufferToTemp(req.body);
+    const outFile = join(tmpdir(), `extracted-audio-${Date.now()}.mp3`);
+    
+    // Extract audio using FFmpeg
+    await sh("ffmpeg", [
+      "-y",
+      "-i", file,           // Input video file
+      "-vn",                // Disable video stream
+      "-acodec", "libmp3lame", // Use MP3 encoder
+      "-ab", "192k",        // Audio bitrate 192kbps (good quality)
+      "-ar", "44100",       // Sample rate 44.1kHz
+      "-ac", "2",           // Stereo audio
+      "-avoid_negative_ts", "make_zero",
+      "-threads", "4",
+      outFile
+    ]);
+    
+    console.log("Audio extraction complete");
+    
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Disposition", 'attachment; filename="extracted-audio.mp3"');
+    res.sendFile(outFile, async (err) => {
+      if (err) console.error("Send file error:", err);
+      await fs.rm(dir, { recursive: true, force: true });
+      console.log("Cleanup complete");
+    });
+    
+  } catch (e) {
+    console.error("Error extracting audio:", e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
