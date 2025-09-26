@@ -901,5 +901,118 @@ app.post("/extract-audio", rawUpload, async (req, res) => {
   }
 });
 
+// Extract 5 screenshots from video endpoint
+app.post("/extract-screenshots", upload.single("video"), async (req, res) => {
+  const tempDir = join(tmpdir(), `screenshots-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
+  
+  try {
+    await fs.mkdir(tempDir, { recursive: true });
+    
+    if (!req.file) {
+      return res.status(400).json({ error: "No video file provided" });
+    }
+
+    const inputPath = join(tempDir, "input.mp4");
+    await fs.writeFile(inputPath, req.file.buffer);
+
+    // First, get video duration
+    const getDurationPromise = new Promise((resolve, reject) => {
+      const process = spawn("ffmpeg", ["-i", inputPath], { stdio: ["pipe", "pipe", "pipe"] });
+      let stderr = "";
+      
+      process.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+      
+      process.on("close", (code) => {
+        const durationMatch = stderr.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
+        if (durationMatch) {
+          const hours = parseInt(durationMatch[1]);
+          const minutes = parseInt(durationMatch[2]);
+          const seconds = parseFloat(durationMatch[3]);
+          const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+          resolve(totalSeconds);
+        } else {
+          reject(new Error("Could not determine video duration"));
+        }
+      });
+    });
+
+    const duration = await getDurationPromise;
+    console.log(`Video duration: ${duration} seconds`);
+
+    // Calculate 5 evenly spaced timestamps
+    const screenshots = [];
+    const interval = duration / 6; // 6 intervals to get 5 middle points
+    
+    for (let i = 1; i <= 5; i++) {
+      const timestamp = interval * i;
+      const outputPath = join(tempDir, `screenshot_${i}.jpg`);
+      
+      console.log(`Extracting screenshot ${i} at ${timestamp.toFixed(2)} seconds`);
+      
+      const screenshotPromise = new Promise((resolve, reject) => {
+        const args = [
+          "-ss", timestamp.toString(),
+          "-i", inputPath,
+          "-vframes", "1",
+          "-q:v", "2",
+          "-preset", "ultrafast",
+          "-threads", "4",
+          "-avoid_negative_ts", "make_zero",
+          "-y",
+          outputPath
+        ];
+        
+        const process = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
+        let stderr = "";
+        
+        process.stderr.on("data", (data) => {
+          stderr += data.toString();
+        });
+        
+        process.on("close", (code) => {
+          if (code === 0) {
+            resolve(outputPath);
+          } else {
+            console.error(`FFmpeg error for screenshot ${i}:`, stderr);
+            reject(new Error(`FFmpeg failed with code ${code}`));
+          }
+        });
+      });
+      
+      const screenshotPath = await screenshotPromise;
+      screenshots.push(screenshotPath);
+    }
+
+    console.log(`Successfully created ${screenshots.length} screenshots`);
+
+    // Return JSON response with base64 encoded screenshots
+    const screenshotData = [];
+    
+    for (let i = 0; i < screenshots.length; i++) {
+      const imageBuffer = await fs.readFile(screenshots[i]);
+      const base64Image = imageBuffer.toString('base64');
+      screenshotData.push({
+        filename: `screenshot_${i + 1}.jpg`,
+        data: `data:image/jpeg;base64,${base64Image}`,
+        timestamp: (duration / 6) * (i + 1)
+      });
+    }
+
+    // Return JSON response with all screenshots
+    res.json({
+      success: true,
+      videoDuration: duration,
+      screenshots: screenshotData,
+      totalScreenshots: screenshots.length
+    });
+
+  } catch (error) {
+    console.error("Screenshot extraction error:", error);
+    res.status(500).json({ error: "Screenshot extraction failed", details: error.message });
+  }
+});
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
