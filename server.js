@@ -902,7 +902,7 @@ app.post("/extract-audio", rawUpload, async (req, res) => {
 });
 
 // Extract 5 screenshots from video endpoint
-app.post("/extract-screenshots", upload.single("video"), async (req, res) => {
+app.post("/extract-screenshots", upload.single("data"), async (req, res) => {
   const tempDir = join(tmpdir(), `screenshots-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
   
   try {
