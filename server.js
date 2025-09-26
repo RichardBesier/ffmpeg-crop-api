@@ -915,21 +915,35 @@ app.post("/extract-screenshots", (req, res) => {
   
   req.on('end', async () => {
     try {
+      console.log('Request ended, processing chunks...');
       await fs.mkdir(tempDir, { recursive: true });
       
       const videoBuffer = Buffer.concat(chunks);
       
       console.log('Request headers:', req.headers);
+      console.log('Number of chunks received:', chunks.length);
       console.log('Received video buffer length:', videoBuffer.length);
       
       if (!videoBuffer || videoBuffer.length === 0) {
+        console.error('No video data received');
         return res.status(400).json({ error: "No video data received" });
       }
 
+      // Verify it's a video file by checking first few bytes
+      const fileHeader = videoBuffer.slice(0, 8).toString('hex');
+      console.log('File header (hex):', fileHeader);
+
+      console.log('Writing video to temp file...');
       const inputPath = join(tempDir, "input.mp4");
       await fs.writeFile(inputPath, videoBuffer);
+      console.log('Video file written successfully');
+
+      // Check if file exists and has content
+      const stats = await fs.stat(inputPath);
+      console.log('Written file size:', stats.size);
 
       // First, get video duration
+      console.log('Getting video duration...');
       const getDurationPromise = new Promise((resolve, reject) => {
         const process = spawn("ffmpeg", ["-i", inputPath], { stdio: ["pipe", "pipe", "pipe"] });
         let stderr = "";
@@ -939,6 +953,9 @@ app.post("/extract-screenshots", (req, res) => {
         });
         
         process.on("close", (code) => {
+          console.log('FFmpeg duration check completed with code:', code);
+          console.log('FFmpeg stderr:', stderr.substring(0, 500)); // First 500 chars
+          
           const durationMatch = stderr.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
           if (durationMatch) {
             const hours = parseInt(durationMatch[1]);
@@ -947,8 +964,13 @@ app.post("/extract-screenshots", (req, res) => {
             const totalSeconds = hours * 3600 + minutes * 60 + seconds;
             resolve(totalSeconds);
           } else {
-            reject(new Error("Could not determine video duration"));
+            reject(new Error("Could not determine video duration. FFmpeg output: " + stderr.substring(0, 200)));
           }
+        });
+        
+        process.on('error', (error) => {
+          console.error('FFmpeg process error:', error);
+          reject(error);
         });
       });
 
