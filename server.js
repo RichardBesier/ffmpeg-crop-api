@@ -902,9 +902,11 @@ app.post("/extract-audio", rawUpload, async (req, res) => {
   }
 });
 
-// Extract 5 screenshots from video endpoint
+// Extract 5 screenshots from video endpoint - MINIMAL VERSION FOR TESTING
 app.post("/extract-screenshots", (req, res) => {
-  const tempDir = join(tmpdir(), `screenshots-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
+  console.log('Screenshots endpoint called');
+  res.json({ message: "Screenshots endpoint is working" });
+});
   
   // Handle raw binary data from n8n
   const chunks = [];
