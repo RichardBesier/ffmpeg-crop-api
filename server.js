@@ -818,30 +818,41 @@ app.post("/expand-image", rawUpload, async (req, res) => {
     
     // Save input image
     const { dir, file } = await bufferToTempWithExt(req.body, ".jpg");
+    const bgFile = join(dir, "background.jpg");
+    const fgFile = join(dir, "foreground.jpg");
     const outFile = join(tmpdir(), `expanded-${Date.now()}.jpg`);
     
-    // Create the expanded image with FFmpeg
+    console.log("Step 1: Creating blurred background");
+    // Step 1: Create blurred background (scale to fill 1920x1080 and blur)
     await sh("ffmpeg", [
       "-y",
-      "-i", file,  // Input image
-      "-i", file,  // Same image again for background
-      
-      // Filter complex to create blurred background + centered original
-      "-filter_complex", [
-        // Background: scale to fill 1920x1080, then blur heavily
-        "[1:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,gblur=sigma=20[bg]",
-        
-        // Foreground: scale to fit within 1920x1080 while preserving aspect ratio
-        "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease[fg]",
-        
-        // Overlay foreground on blurred background, centered
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2"
-      ].join(";"),
-      
-      // Output settings
-      "-q:v", "2",  // High quality JPEG
-      "-avoid_negative_ts", "make_zero",
-      "-threads", "4",
+      "-i", file,
+      "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,gblur=sigma=20",
+      "-q:v", "2",
+      "-threads", "2",
+      bgFile
+    ]);
+    
+    console.log("Step 2: Creating scaled foreground");
+    // Step 2: Create scaled foreground (fit within 1920x1080)
+    await sh("ffmpeg", [
+      "-y",
+      "-i", file,
+      "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease",
+      "-q:v", "2",
+      "-threads", "2",
+      fgFile
+    ]);
+    
+    console.log("Step 3: Compositing images");
+    // Step 3: Overlay foreground on background
+    await sh("ffmpeg", [
+      "-y",
+      "-i", bgFile,
+      "-i", fgFile,
+      "-filter_complex", "[0:v][1:v]overlay=(W-w)/2:(H-h)/2",
+      "-q:v", "2",
+      "-threads", "2",
       outFile
     ]);
     
@@ -902,160 +913,129 @@ app.post("/extract-audio", rawUpload, async (req, res) => {
   }
 });
 
-// Extract 5 screenshots from video endpoint - MINIMAL VERSION FOR TESTING
-app.post("/extract-screenshots", (req, res) => {
-  console.log('Screenshots endpoint called');
-  res.json({ message: "Screenshots endpoint is working" });
-});
+// Add this endpoint after your existing endpoints in server.js
+
+app.post("/extract-screenshots", upload.single("video"), async (req, res) => {
+  const tempDir = join(tmpdir(), `screenshots-${Date.now()}-${Math.random().toString(36).substring(7)}`);
   
-  // Handle raw binary data from n8n
-  const chunks = [];
-  
-  req.on('data', chunk => {
-    chunks.push(chunk);
-  });
-  
-  req.on('end', async () => {
-    try {
-      console.log('Request ended, processing chunks...');
-      await fs.mkdir(tempDir, { recursive: true });
-      
-      const videoBuffer = Buffer.concat(chunks);
-      
-      console.log('Request headers:', req.headers);
-      console.log('Number of chunks received:', chunks.length);
-      console.log('Received video buffer length:', videoBuffer.length);
-      
-      if (!videoBuffer || videoBuffer.length === 0) {
-        console.error('No video data received');
-        return res.status(400).json({ error: "No video data received" });
-      }
+  try {
+    console.log("Creating temp directory for screenshots");
+    await fs.mkdir(tempDir, { recursive: true });
 
-      // Verify it's a video file by checking first few bytes
-      const fileHeader = videoBuffer.slice(0, 8).toString('hex');
-      console.log('File header (hex):', fileHeader);
+    const inputPath = join(tempDir, "input.mp4");
+    await fs.writeFile(inputPath, req.file.buffer);
 
-      console.log('Writing video to temp file...');
-      const inputPath = join(tempDir, "input.mp4");
-      await fs.writeFile(inputPath, videoBuffer);
-      console.log('Video file written successfully');
+    console.log("Getting video duration");
+    // First, get the video duration
+    const durationPromise = new Promise((resolve, reject) => {
+      const process = spawn("ffprobe", [
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_format",
+        inputPath
+      ]);
 
-      // Check if file exists and has content
-      const stats = await fs.stat(inputPath);
-      console.log('Written file size:', stats.size);
+      let output = "";
+      process.stdout.on("data", (data) => {
+        output += data.toString();
+      });
 
-      // First, get video duration
-      console.log('Getting video duration...');
-      const getDurationPromise = new Promise((resolve, reject) => {
-        const process = spawn("ffmpeg", ["-i", inputPath], { stdio: ["pipe", "pipe", "pipe"] });
-        let stderr = "";
+      process.on("close", (code) => {
+        if (code === 0) {
+          try {
+            const info = JSON.parse(output);
+            const duration = parseFloat(info.format.duration);
+            resolve(duration);
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          reject(new Error(`ffprobe failed with code ${code}`));
+        }
+      });
+    });
+
+    const duration = await durationPromise;
+    console.log(`Video duration: ${duration} seconds`);
+
+    // Calculate 5 evenly spaced timestamps (avoiding very start and end)
+    const interval = duration / 6; // 6 intervals for 5 screenshots in the middle
+    const timestamps = [];
+    for (let i = 1; i <= 5; i++) {
+      timestamps.push(interval * i);
+    }
+
+    console.log("Timestamps for screenshots:", timestamps);
+
+    // Extract screenshots at calculated timestamps
+    const screenshotPromises = timestamps.map((timestamp, index) => {
+      return new Promise((resolve, reject) => {
+        const outputPath = join(tempDir, `screenshot_${index + 1}.jpg`);
         
-        process.stderr.on("data", (data) => {
-          stderr += data.toString();
-        });
-        
+        const process = spawn("ffmpeg", [
+          "-ss", timestamp.toString(),
+          "-i", inputPath,
+          "-vframes", "1",
+          "-q:v", "2", // High quality
+          "-y", // Overwrite output files
+          "-threads", "4",
+          "-preset", "ultrafast",
+          outputPath
+        ]);
+
         process.on("close", (code) => {
-          console.log('FFmpeg duration check completed with code:', code);
-          console.log('FFmpeg stderr:', stderr.substring(0, 500)); // First 500 chars
-          
-          const durationMatch = stderr.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
-          if (durationMatch) {
-            const hours = parseInt(durationMatch[1]);
-            const minutes = parseInt(durationMatch[2]);
-            const seconds = parseFloat(durationMatch[3]);
-            const totalSeconds = hours * 3600 + minutes * 60 + seconds;
-            resolve(totalSeconds);
+          if (code === 0) {
+            console.log(`Screenshot ${index + 1} extracted successfully`);
+            resolve(outputPath);
           } else {
-            reject(new Error("Could not determine video duration. FFmpeg output: " + stderr.substring(0, 200)));
+            reject(new Error(`Screenshot extraction failed for timestamp ${timestamp}`));
           }
         });
-        
-        process.on('error', (error) => {
-          console.error('FFmpeg process error:', error);
-          reject(error);
+
+        process.stderr.on("data", (data) => {
+          console.log(`FFmpeg stderr: ${data}`);
         });
       });
+    });
 
-      const duration = await getDurationPromise;
-      console.log(`Video duration: ${duration} seconds`);
+    console.log("Extracting all screenshots simultaneously");
+    const screenshotPaths = await Promise.all(screenshotPromises);
 
-      // Calculate 5 evenly spaced timestamps
-      const screenshots = [];
-      const interval = duration / 6; // 6 intervals to get 5 middle points
-      
-      for (let i = 1; i <= 5; i++) {
-        const timestamp = interval * i;
-        const outputPath = join(tempDir, `screenshot_${i}.jpg`);
-        
-        console.log(`Extracting screenshot ${i} at ${timestamp.toFixed(2)} seconds`);
-        
-        const screenshotPromise = new Promise((resolve, reject) => {
-          const args = [
-            "-ss", timestamp.toString(),
-            "-i", inputPath,
-            "-vframes", "1",
-            "-q:v", "2",
-            "-preset", "ultrafast",
-            "-threads", "4",
-            "-avoid_negative_ts", "make_zero",
-            "-y",
-            outputPath
-          ];
-          
-          const process = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
-          let stderr = "";
-          
-          process.stderr.on("data", (data) => {
-            stderr += data.toString();
-          });
-          
-          process.on("close", (code) => {
-            if (code === 0) {
-              resolve(outputPath);
-            } else {
-              console.error(`FFmpeg error for screenshot ${i}:`, stderr);
-              reject(new Error(`FFmpeg failed with code ${code}`));
-            }
-          });
-        });
-        
-        const screenshotPath = await screenshotPromise;
-        screenshots.push(screenshotPath);
-      }
+    // Read all screenshot files
+    const screenshots = await Promise.all(
+      screenshotPaths.map(async (path, index) => {
+        const buffer = await fs.readFile(path);
+        return {
+          filename: `screenshot_${index + 1}.jpg`,
+          buffer: buffer,
+          size: buffer.length
+        };
+      })
+    );
 
-      console.log(`Successfully created ${screenshots.length} screenshots`);
+    console.log("All screenshots extracted successfully");
 
-      // Return JSON response with base64 encoded screenshots
-      const screenshotData = [];
-      
-      for (let i = 0; i < screenshots.length; i++) {
-        const imageBuffer = await fs.readFile(screenshots[i]);
-        const base64Image = imageBuffer.toString('base64');
-        screenshotData.push({
-          filename: `screenshot_${i + 1}.jpg`,
-          data: `data:image/jpeg;base64,${base64Image}`,
-          timestamp: (duration / 6) * (i + 1)
-        });
-      }
+    // For now, return the first screenshot as response
+    // You can modify this to return all screenshots as needed
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Content-Disposition", "attachment; filename=screenshot_1.jpg");
+    res.send(screenshots[0].buffer);
 
-      // Return JSON response with all screenshots
-      res.json({
-        success: true,
-        videoDuration: duration,
-        screenshots: screenshotData,
-        totalScreenshots: screenshots.length
-      });
-
-    } catch (error) {
-      console.error("Screenshot extraction error:", error);
-      res.status(500).json({ error: "Screenshot extraction failed", details: error.message });
+  } catch (error) {
+    console.error("Screenshot extraction failed:", error);
+    res.status(500).json({ 
+      error: "Screenshot extraction failed", 
+      message: error.message 
+    });
+  } finally {
+    // Cleanup temp directory
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      console.log("Temp directory cleaned up");
+    } catch (cleanupError) {
+      console.error("Cleanup failed:", cleanupError);
     }
-  });
-  
-  req.on('error', (error) => {
-    console.error('Request error:', error);
-    res.status(500).json({ error: "Request failed", details: error.message });
-  });
+  }
 });
 
 app.get("/", (_, res) => res.send("OK"));
