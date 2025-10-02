@@ -6,7 +6,6 @@ import { join } from "path";
 import { spawn } from "child_process";
 import multer from "multer";
 import { createCanvas, loadImage, registerFont } from 'canvas';
-import express from "express";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
