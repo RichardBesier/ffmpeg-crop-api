@@ -195,10 +195,12 @@ app.post("/crop-to-1370", rawUpload, async (req, res) => {
     const { dir, file } = await bufferToTemp(req.body);
     const outFile = join(tmpdir(), `cropped-1370-${Date.now()}.mp4`);
     
+    // First scale to 1080x1920, THEN crop to 1080x1370
+    // This ensures any input size works
     await sh("ffmpeg", [
       "-y",
       "-i", file,
-      "-vf", "crop=1080:1370:0:275",
+      "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,crop=1080:1370:0:275",
       "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
       "-pix_fmt", "yuv420p", "-movflags", "+faststart",
       "-avoid_negative_ts", "make_zero",
