@@ -185,6 +185,44 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
   }
 });
 
+// Crop center to 1080x1370px (removes 275px from top and bottom of 1080x1920 video)
+app.post("/crop-to-1370", rawUpload, async (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ error: "No video file in body" });
+    
+    console.log(`Cropping to 1080x1370px, input size: ${req.body.length} bytes`);
+    
+    const { dir, file } = await bufferToTemp(req.body);
+    const outFile = join(tmpdir(), `cropped-1370-${Date.now()}.mp4`);
+    
+    await sh("ffmpeg", [
+      "-y",
+      "-i", file,
+      "-vf", "crop=1080:1370:0:275",
+      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      "-avoid_negative_ts", "make_zero",
+      "-threads", "4",
+      "-c:a", "copy",
+      outFile
+    ]);
+    
+    console.log("Cropping complete - output is 1080x1370px");
+    
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", 'attachment; filename="cropped-1080x1370.mp4"');
+    res.sendFile(outFile, async (err) => {
+      if (err) console.error("Send file error:", err);
+      await fs.rm(dir, { recursive: true, force: true });
+      console.log("Cleanup complete");
+    });
+    
+  } catch (e) {
+    console.error("Error cropping video:", e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // Place a cropped video onto a 1080x1920 PNG template - OPTIMIZED VERSION
 app.post("/place-on-template",
   upload.fields([{ name: "template" }, { name: "video" }]),
@@ -1219,51 +1257,6 @@ app.post("/crop-strip-top", rawUpload, async (req, res) => {
     res.setHeader("Content-Disposition", 'attachment; filename="cropped.mp4"');
     res.sendFile(outFile, async () => { await fs.rm(dir, { recursive: true, force: true }); });
   } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
-  }
-});
-
-// Crop center to 1080x1370px (removes 275px from top and bottom of 1080x1920 video)
-app.post("/crop-to-1370", rawUpload, async (req, res) => {
-  try {
-    if (!req.body?.length) return res.status(400).json({ error: "No video file in body" });
-    
-    console.log(`Cropping to 1080x1370px, input size: ${req.body.length} bytes`);
-    
-    const { dir, file } = await bufferToTemp(req.body);
-    const outFile = join(tmpdir(), `cropped-1370-${Date.now()}.mp4`);
-    
-    // Crop center to 1080x1370px
-    // For a 1080x1920 input: removes 550px total (275px top + 275px bottom)
-    // crop=width:height:x:y
-    // width = 1080
-    // height = 1370
-    // x = 0 (no horizontal offset)
-    // y = 275 (start 275px from top to center the crop)
-    await sh("ffmpeg", [
-      "-y",
-      "-i", file,
-      "-vf", "crop=1080:1370:0:275",
-      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
-      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-      "-avoid_negative_ts", "make_zero",
-      "-threads", "4",
-      "-c:a", "copy",
-      outFile
-    ]);
-    
-    console.log("Cropping complete - output is 1080x1370px");
-    
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", 'attachment; filename="cropped-1080x1370.mp4"');
-    res.sendFile(outFile, async (err) => {
-      if (err) console.error("Send file error:", err);
-      await fs.rm(dir, { recursive: true, force: true });
-      console.log("Cleanup complete");
-    });
-    
-  } catch (e) {
-    console.error("Error cropping video:", e);
     res.status(500).json({ error: String(e.message || e) });
   }
 });
