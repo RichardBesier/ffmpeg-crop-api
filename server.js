@@ -1037,5 +1037,53 @@ app.post("/extract-screenshots", upload.single("video"), async (req, res) => {
   }
 });
 
+// Crop 15% from top and 15% from bottom (keeps middle 70%)
+app.post("/crop-top-bottom-15", rawUpload, async (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ error: "No video file in body" });
+    
+    console.log(`Cropping 15% from top and bottom, input size: ${req.body.length} bytes`);
+    
+    const { dir, file } = await bufferToTemp(req.body);
+    const outFile = join(tmpdir(), `cropped-tb15-${Date.now()}.mp4`);
+    
+    // Crop: keep middle 70% of height (15% from top, 15% from bottom)
+    // crop=width:height:x:y
+    // width = input width (iw)
+    // height = 70% of input height (ih*0.7)
+    // x = 0 (no horizontal crop)
+    // y = 15% from top (ih*0.15)
+    await sh("ffmpeg", [
+      "-y",
+      "-i", file,
+      "-vf", "crop=iw:ih*0.7:0:ih*0.15",
+      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      "-avoid_negative_ts", "make_zero",
+      "-threads", "4",
+      "-c:a", "copy", // Copy audio stream without re-encoding
+      outFile
+    ]);
+    
+    console.log("Cropping complete");
+    
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", 'attachment; filename="cropped-top-bottom-15.mp4"');
+    res.sendFile(outFile, async (err) => {
+      if (err) console.error("Send file error:", err);
+      await fs.rm(dir, { recursive: true, force: true });
+      console.log("Cleanup complete");
+    });
+    
+  } catch (e) {
+    console.error("Error cropping video:", e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// Add this endpoint after your existing endpoints in server.js
+
+app.post("/extract-screenshots", upload.single("video"), async (req, res) => {
+
 app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 8080, () => console.log("Crop API running"));
