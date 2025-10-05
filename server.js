@@ -848,7 +848,7 @@ app.post("/merge-instagram-audio", rawUpload, async (req, res) => {
   }
 });
 
-// Expand image to 1920x1080 with blurred background
+// Expand image to 1920x1080 with clean black background
 app.post("/expand-image", rawUpload, async (req, res) => {
   try {
     if (!req.body?.length) return res.status(400).json({ error: "No image file in body" });
@@ -857,39 +857,14 @@ app.post("/expand-image", rawUpload, async (req, res) => {
     
     // Save input image
     const { dir, file } = await bufferToTempWithExt(req.body, ".jpg");
-    const bgFile = join(dir, "background.jpg");
-    const fgFile = join(dir, "foreground.jpg");
     const outFile = join(tmpdir(), `expanded-${Date.now()}.jpg`);
     
-    console.log("Step 1: Creating blurred background");
-    // Step 1: Create blurred background (scale to fill 1920x1080 and blur)
+    console.log("Scaling image to 1920x1080 with black background");
+    // Scale image to fit within 1920x1080 and pad with black background
     await sh("ffmpeg", [
       "-y",
       "-i", file,
-      "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,gblur=sigma=20",
-      "-q:v", "2",
-      "-threads", "2",
-      bgFile
-    ]);
-    
-    console.log("Step 2: Creating scaled foreground");
-    // Step 2: Create scaled foreground (fit within 1920x1080)
-    await sh("ffmpeg", [
-      "-y",
-      "-i", file,
-      "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease",
-      "-q:v", "2",
-      "-threads", "2",
-      fgFile
-    ]);
-    
-    console.log("Step 3: Compositing images");
-    // Step 3: Overlay foreground on background
-    await sh("ffmpeg", [
-      "-y",
-      "-i", bgFile,
-      "-i", fgFile,
-      "-filter_complex", "[0:v][1:v]overlay=(W-w)/2:(H-h)/2",
+      "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
       "-q:v", "2",
       "-threads", "2",
       outFile
