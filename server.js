@@ -848,6 +848,137 @@ app.post("/merge-instagram-audio", rawUpload, async (req, res) => {
   }
 });
 
+// Add this endpoint to your server.js after your other endpoints
+
+app.post("/combine-audio", upload.array('data', 6), async (req, res) => {
+  const tempDir = await fs.mkdtemp(join(tmpdir(), "audio-combine-"));
+  
+  try {
+    console.log("[combine-audio] Starting audio combination process");
+    
+    // Check that all 6 audio files are provided
+    if (!req.files || req.files.length !== 6) {
+      return res.status(400).json({ 
+        error: `Expected 6 audio files, received ${req.files ? req.files.length : 0}` 
+      });
+    }
+    
+    const audioFiles = req.files;
+    console.log("[combine-audio] All 6 audio files received");
+    
+    // Save all uploaded files to temp directory
+    const savedPaths = [];
+    for (let i = 0; i < audioFiles.length; i++) {
+      const audioPath = join(tempDir, `audio_${i + 1}.mpga`);
+      await fs.writeFile(audioPath, audioFiles[i].buffer);
+      savedPaths.push(audioPath);
+      console.log(`[combine-audio] Saved audio ${i + 1}`);
+    }
+    
+    // Create 1.5 second silence audio file
+    const silencePath = join(tempDir, "silence.mp3");
+    await new Promise((resolve, reject) => {
+      const silenceArgs = [
+        "-f", "lavfi",
+        "-i", "anullsrc=r=44100:cl=stereo",
+        "-t", "1.5",
+        "-q:a", "2",
+        "-y",
+        silencePath
+      ];
+      
+      console.log("[combine-audio] Creating silence file");
+      const silenceProc = spawn("ffmpeg", silenceArgs);
+      
+      silenceProc.on("close", (code) => {
+        if (code === 0) {
+          console.log("[combine-audio] Silence file created");
+          resolve();
+        } else {
+          reject(new Error(`Silence creation failed with code ${code}`));
+        }
+      });
+    });
+    
+    // Create concat demuxer file list
+    const concatListPath = join(tempDir, "concat_list.txt");
+    const concatLines = [];
+    
+    for (let i = 0; i < savedPaths.length; i++) {
+      concatLines.push(`file '${savedPaths[i]}'`);
+      // Add silence between files (but not after the last file)
+      if (i < savedPaths.length - 1) {
+        concatLines.push(`file '${silencePath}'`);
+      }
+    }
+    
+    await fs.writeFile(concatListPath, concatLines.join("\n"));
+    console.log("[combine-audio] Created concat list with silence gaps");
+    
+    // Combine all audio files with silence in between
+    const outputPath = join(tempDir, "combined_audio.mp3");
+    await new Promise((resolve, reject) => {
+      const combineArgs = [
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concatListPath,
+        "-c", "copy",
+        "-y",
+        outputPath
+      ];
+      
+      console.log("[combine-audio] Combining audio files");
+      const combineProc = spawn("ffmpeg", combineArgs);
+      
+      let stderr = "";
+      combineProc.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+      
+      combineProc.on("close", (code) => {
+        if (code === 0) {
+          console.log("[combine-audio] Audio files combined successfully");
+          resolve();
+        } else {
+          console.error("[combine-audio] FFmpeg error:", stderr);
+          reject(new Error(`Audio combination failed with code ${code}`));
+        }
+      });
+    });
+    
+    // Send the combined audio file
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Disposition", 'attachment; filename="combined_audio.mp3"');
+    res.sendFile(outputPath, async (err) => {
+      if (err) {
+        console.error("[combine-audio] Error sending file:", err);
+      }
+      // Cleanup temp directory
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        console.log("[combine-audio] Cleanup completed");
+      } catch (cleanupErr) {
+        console.error("[combine-audio] Cleanup error:", cleanupErr);
+      }
+    });
+    
+  } catch (error) {
+    console.error("[combine-audio] Error:", error);
+    
+    // Cleanup on error
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      console.error("[combine-audio] Cleanup error:", cleanupErr);
+    }
+    
+    res.status(500).json({ 
+      error: "Audio combination failed", 
+      details: error.message 
+    });
+  }
+});
+
 // Expand image to 1920x1080 with original image as background
 app.post("/expand-image", rawUpload, async (req, res) => {
   try {
