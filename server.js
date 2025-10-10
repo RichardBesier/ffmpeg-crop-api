@@ -850,20 +850,33 @@ app.post("/merge-instagram-audio", rawUpload, async (req, res) => {
 
 // Add this endpoint to your server.js after your other endpoints
 
-app.post("/combine-audio", upload.array('data', 6), async (req, res) => {
+app.post("/combine-audio", upload.fields([
+  { name: 'video1', maxCount: 1 },
+  { name: 'video2', maxCount: 1 },
+  { name: 'video3', maxCount: 1 },
+  { name: 'video4', maxCount: 1 },
+  { name: 'video5', maxCount: 1 },
+  { name: 'video6', maxCount: 1 }
+]), async (req, res) => {
   const tempDir = await fs.mkdtemp(join(tmpdir(), "audio-combine-"));
   
   try {
     console.log("[combine-audio] Starting audio combination process");
+    console.log("[combine-audio] Received files:", Object.keys(req.files || {}));
     
     // Check that all 6 audio files are provided
-    if (!req.files || req.files.length !== 6) {
-      return res.status(400).json({ 
-        error: `Expected 6 audio files, received ${req.files ? req.files.length : 0}` 
-      });
+    const audioFiles = [];
+    for (let i = 1; i <= 6; i++) {
+      const fieldName = `video${i}`;
+      if (!req.files || !req.files[fieldName] || !req.files[fieldName][0]) {
+        return res.status(400).json({ 
+          error: `Missing audio file: ${fieldName}`,
+          receivedFields: Object.keys(req.files || {})
+        });
+      }
+      audioFiles.push(req.files[fieldName][0]);
     }
     
-    const audioFiles = req.files;
     console.log("[combine-audio] All 6 audio files received");
     
     // Save all uploaded files to temp directory
