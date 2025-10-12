@@ -16,6 +16,9 @@ const rawUpload = express.raw({ type: "*/*", limit: "500mb" });
 // Multer for multipart/form-data (used by /place-on-template)
 const upload = multer();
 
+// Storage for audio parts (in production, use Redis or a database)
+const audioParts = new Map();
+
 // ------------------------------
 // helpers
 // ------------------------------
@@ -883,56 +886,116 @@ app.post("/combine-audio", upload.fields([
     
     console.log("[combine-audio] All 6 audio files received");
     
-    // Save all uploaded files to temp directory
+    // Save all uploaded files to temp directory and get their durations
     const savedPaths = [];
+    let totalDuration = 0;
+    
     for (let i = 0; i < audioFiles.length; i++) {
       const audioPath = join(tempDir, `audio_${i + 1}.mpga`);
       await fs.writeFile(audioPath, audioFiles[i].buffer);
       savedPaths.push(audioPath);
-      console.log(`[combine-audio] Saved audio ${i + 1}`);
+      
+      // Get duration of this audio file
+      const { stdout: durOut } = await sh("ffprobe", [
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=nk=1:nw=1",
+        audioPath
+      ]);
+      const audioDuration = parseFloat(durOut || "0");
+      totalDuration += audioDuration;
+      
+      console.log(`[combine-audio] Saved audio ${i + 1}, duration: ${audioDuration.toFixed(2)}s`);
     }
     
-    // Create 10 second silence audio file
-    const silencePath = join(tempDir, "silence.mp3");
+    // Add duration for 1-second gaps between audios (5 gaps for 6 audios)
+    const gapDuration = 1; // 1 second between each audio
+    const numberOfGaps = 5; // 5 gaps between 6 audios
+    totalDuration += (gapDuration * numberOfGaps);
+    
+    console.log(`[combine-audio] Total content duration: ${totalDuration.toFixed(2)}s`);
+    
+    // Target duration is 2:50 = 170 seconds
+    const targetDuration = 170;
+    const remainingSilence = Math.max(0, targetDuration - totalDuration);
+    
+    console.log(`[combine-audio] Remaining silence needed: ${remainingSilence.toFixed(2)}s`);
+    
+    // Create 1 second silence audio file for gaps
+    const gapSilencePath = join(tempDir, "gap_silence.mp3");
     await new Promise((resolve, reject) => {
       const silenceArgs = [
         "-f", "lavfi",
         "-i", "anullsrc=r=44100:cl=stereo",
-        "-t", "10",
+        "-t", String(gapDuration),
         "-q:a", "2",
         "-y",
-        silencePath
+        gapSilencePath
       ];
       
-      console.log("[combine-audio] Creating silence file");
+      console.log("[combine-audio] Creating gap silence file (1 second)");
       const silenceProc = spawn("ffmpeg", silenceArgs);
       
       silenceProc.on("close", (code) => {
         if (code === 0) {
-          console.log("[combine-audio] Silence file created");
+          console.log("[combine-audio] Gap silence file created");
           resolve();
         } else {
-          reject(new Error(`Silence creation failed with code ${code}`));
+          reject(new Error(`Gap silence creation failed with code ${code}`));
         }
       });
     });
+    
+    // Create final silence audio file (to reach 2:50)
+    let finalSilencePath = null;
+    if (remainingSilence > 0) {
+      finalSilencePath = join(tempDir, "final_silence.mp3");
+      await new Promise((resolve, reject) => {
+        const silenceArgs = [
+          "-f", "lavfi",
+          "-i", "anullsrc=r=44100:cl=stereo",
+          "-t", String(remainingSilence),
+          "-q:a", "2",
+          "-y",
+          finalSilencePath
+        ];
+        
+        console.log(`[combine-audio] Creating final silence file (${remainingSilence.toFixed(2)} seconds)`);
+        const silenceProc = spawn("ffmpeg", silenceArgs);
+        
+        silenceProc.on("close", (code) => {
+          if (code === 0) {
+            console.log("[combine-audio] Final silence file created");
+            resolve();
+          } else {
+            reject(new Error(`Final silence creation failed with code ${code}`));
+          }
+        });
+      });
+    }
     
     // Create concat demuxer file list
     const concatListPath = join(tempDir, "concat_list.txt");
     const concatLines = [];
     
+    // Add audio files with 1-second gaps between them
     for (let i = 0; i < savedPaths.length; i++) {
       concatLines.push(`file '${savedPaths[i]}'`);
-      // Add silence between files (but not after the last file)
+      // Add 1-second gap after each audio except the last one
       if (i < savedPaths.length - 1) {
-        concatLines.push(`file '${silencePath}'`);
+        concatLines.push(`file '${gapSilencePath}'`);
       }
     }
     
-    await fs.writeFile(concatListPath, concatLines.join("\n"));
-    console.log("[combine-audio] Created concat list with silence gaps");
+    // Add final silence to reach exactly 2:50
+    if (finalSilencePath) {
+      concatLines.push(`file '${finalSilencePath}'`);
+    }
     
-    // Combine all audio files with silence in between
+    await fs.writeFile(concatListPath, concatLines.join("\n"));
+    console.log("[combine-audio] Created concat list with gaps and final silence");
+    
+    // Combine all audio files
     const outputPath = join(tempDir, "combined_audio.mp3");
     await new Promise((resolve, reject) => {
       const combineArgs = [
@@ -954,7 +1017,7 @@ app.post("/combine-audio", upload.fields([
       
       combineProc.on("close", (code) => {
         if (code === 0) {
-          console.log("[combine-audio] Audio files combined successfully");
+          console.log("[combine-audio] Audio files combined successfully - final duration: 2:50 (170 seconds)");
           resolve();
         } else {
           console.error("[combine-audio] FFmpeg error:", stderr);
@@ -987,6 +1050,213 @@ app.post("/combine-audio", upload.fields([
       await fs.rm(tempDir, { recursive: true, force: true });
     } catch (cleanupErr) {
       console.error("[combine-audio] Cleanup error:", cleanupErr);
+    }
+    
+    res.status(500).json({ 
+      error: "Audio combination failed", 
+      details: error.message 
+    });
+  }
+});
+
+// Step 1: Upload individual audio parts (alternative two-step approach)
+app.post("/upload-audio-part", upload.single('data'), async (req, res) => {
+  try {
+    const { sessionId, part } = req.query;
+    
+    if (!sessionId || !part) {
+      return res.status(400).json({ 
+        error: "Missing required query parameters: sessionId and part" 
+      });
+    }
+    
+    if (!req.file) {
+      return res.status(400).json({ 
+        error: "No audio file provided" 
+      });
+    }
+    
+    const partNum = parseInt(part);
+    if (isNaN(partNum) || partNum < 1 || partNum > 6) {
+      return res.status(400).json({ 
+        error: "Part must be between 1 and 6" 
+      });
+    }
+    
+    // Initialize session if it doesn't exist
+    if (!audioParts.has(sessionId)) {
+      audioParts.set(sessionId, {});
+    }
+    
+    // Store the audio part
+    const session = audioParts.get(sessionId);
+    session[partNum] = req.file.buffer;
+    
+    console.log(`[upload-audio-part] Stored part ${partNum} for session ${sessionId}`);
+    console.log(`[upload-audio-part] Session now has ${Object.keys(session).length} parts`);
+    
+    res.json({ 
+      success: true, 
+      sessionId,
+      part: partNum,
+      partsReceived: Object.keys(session).length,
+      partsNeeded: 6
+    });
+    
+  } catch (error) {
+    console.error("[upload-audio-part] Error:", error);
+    res.status(500).json({ 
+      error: "Failed to upload audio part", 
+      details: error.message 
+    });
+  }
+});
+
+// Step 2: Combine all uploaded parts
+app.post("/combine-audio-parts", async (req, res) => {
+  const tempDir = await fs.mkdtemp(join(tmpdir(), "audio-combine-"));
+  
+  try {
+    const { sessionId } = req.query;
+    
+    if (!sessionId) {
+      return res.status(400).json({ 
+        error: "Missing required query parameter: sessionId" 
+      });
+    }
+    
+    if (!audioParts.has(sessionId)) {
+      return res.status(404).json({ 
+        error: "Session not found. Please upload audio parts first." 
+      });
+    }
+    
+    const session = audioParts.get(sessionId);
+    const partsCount = Object.keys(session).length;
+    
+    if (partsCount !== 6) {
+      return res.status(400).json({ 
+        error: `Expected 6 audio parts, but only ${partsCount} were uploaded`,
+        receivedParts: Object.keys(session).map(k => parseInt(k)).sort()
+      });
+    }
+    
+    console.log("[combine-audio-parts] Starting combination for session:", sessionId);
+    
+    // Save all parts to temp files
+    const savedPaths = [];
+    for (let i = 1; i <= 6; i++) {
+      if (!session[i]) {
+        return res.status(400).json({ 
+          error: `Missing part ${i}` 
+        });
+      }
+      
+      const audioPath = join(tempDir, `audio_${i}.mpga`);
+      await fs.writeFile(audioPath, session[i]);
+      savedPaths.push(audioPath);
+      console.log(`[combine-audio-parts] Saved part ${i}`);
+    }
+    
+    // Create 1.5 second silence audio file
+    const silencePath = join(tempDir, "silence.mp3");
+    await new Promise((resolve, reject) => {
+      const silenceArgs = [
+        "-f", "lavfi",
+        "-i", "anullsrc=r=44100:cl=stereo",
+        "-t", "1.5",
+        "-q:a", "2",
+        "-y",
+        silencePath
+      ];
+      
+      console.log("[combine-audio-parts] Creating silence file");
+      const silenceProc = spawn("ffmpeg", silenceArgs);
+      
+      silenceProc.on("close", (code) => {
+        if (code === 0) {
+          console.log("[combine-audio-parts] Silence file created");
+          resolve();
+        } else {
+          reject(new Error(`Silence creation failed with code ${code}`));
+        }
+      });
+    });
+    
+    // Create concat demuxer file list
+    const concatListPath = join(tempDir, "concat_list.txt");
+    const concatLines = [];
+    
+    for (let i = 0; i < savedPaths.length; i++) {
+      concatLines.push(`file '${savedPaths[i]}'`);
+      // Add silence between files (but not after the last file)
+      if (i < savedPaths.length - 1) {
+        concatLines.push(`file '${silencePath}'`);
+      }
+    }
+    
+    await fs.writeFile(concatListPath, concatLines.join("\n"));
+    console.log("[combine-audio-parts] Created concat list with silence gaps");
+    
+    // Combine all audio files with silence in between
+    const outputPath = join(tempDir, "combined_audio.mp3");
+    await new Promise((resolve, reject) => {
+      const combineArgs = [
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concatListPath,
+        "-c", "copy",
+        "-y",
+        outputPath
+      ];
+      
+      console.log("[combine-audio-parts] Combining audio files");
+      const combineProc = spawn("ffmpeg", combineArgs);
+      
+      let stderr = "";
+      combineProc.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+      
+      combineProc.on("close", (code) => {
+        if (code === 0) {
+          console.log("[combine-audio-parts] Audio files combined successfully");
+          resolve();
+        } else {
+          console.error("[combine-audio-parts] FFmpeg error:", stderr);
+          reject(new Error(`Audio combination failed with code ${code}`));
+        }
+      });
+    });
+    
+    // Clean up session data
+    audioParts.delete(sessionId);
+    console.log("[combine-audio-parts] Cleaned up session:", sessionId);
+    
+    // Send the combined audio file
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Disposition", 'attachment; filename="combined_audio.mp3"');
+    res.sendFile(outputPath, async (err) => {
+      if (err) {
+        console.error("[combine-audio-parts] Error sending file:", err);
+      }
+      // Cleanup temp directory
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        console.log("[combine-audio-parts] Cleanup completed");
+      } catch (cleanupErr) {
+        console.error("[combine-audio-parts] Cleanup error:", cleanupErr);
+      }
+    });
+    
+  } catch (error) {
+    console.error("[combine-audio-parts] Error:", error);
+    
+    // Cleanup on error
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      console.error("[combine-audio-parts] Cleanup error:", cleanupErr);
     }
     
     res.status(500).json({ 
